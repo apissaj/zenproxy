@@ -1,5 +1,10 @@
 # zenproxy
 
+[![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/hafizhmuzani/zenproxy?color=blue)](https://github.com/hafizhmuzani/zenproxy/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/hafizhmuzani/zenproxy/release.yml?label=build)](https://github.com/hafizhmuzani/zenproxy/actions)
+
 Lightweight, single-binary HTTP proxy that exposes [OpenCode Zen](https://opencode.ai) upstreams as OpenAI-compatible APIs.
 
 `zenproxy` translates OpenAI Chat Completions requests into OpenCode Zen calls, with model aliasing, reasoning-effort mapping, and the same session emulation the OpenCode CLI uses. Written from scratch in Go — no runtime dependencies, cross-compiled binaries for every major platform.
