@@ -2,6 +2,7 @@
 zenproxy.exe
 zenproxy
 bin/
+zenproxy.exe~
 
 # Local config with secrets — never commit
 config.json

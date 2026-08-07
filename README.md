@@ -8,7 +8,8 @@ Lightweight, single-binary HTTP proxy that exposes [OpenCode Zen](https://openco
 
 ## Features
 
-- **OpenAI-compatible endpoint**: `/v1/chat/completions` (non-stream + SSE stream), `/v1/models`
+- **OpenAI-compatible endpoints**: `/v1/chat/completions` (non-stream + SSE stream), `/v1/responses`, `/v1/models`
+- **Anthropic Messages endpoint**: `/v1/messages` (non-stream + SSE stream, OpenAI-format chunks)
 - **Free-tier routing**: no key, `Bearer public`, or placeholder keys → free `-free` Zen models
 - **Paid-tier routing**: `Bearer <sk-...>` auto-detects Go-only models; `zen:` and `go:` prefixes force a tier
 - **Model aliases**: expose friendly names (`mimo-v2.5`) mapped to upstream IDs (`mimo-v2.5-free`)
@@ -48,6 +49,23 @@ Streaming:
 curl -N http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"count 1 to 3"}],"stream":true}'
+```
+
+OpenAI Responses API:
+
+```bash
+curl http://127.0.0.1:8000/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{"model":"mimo-v2.5","input":"hello"}'
+```
+
+Anthropic Messages API (Claude Code compatible):
+
+```bash
+curl http://127.0.0.1:8000/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: public" \
+  -d '{"model":"mimo-v2.5","max_tokens":1024,"messages":[{"role":"user","content":"hello"}]}'
 ```
 
 ## Authentication modes

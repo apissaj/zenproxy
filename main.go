@@ -48,6 +48,8 @@ func main() {
 	mux.Handle("/health", withRequestID(http.HandlerFunc(healthHandler)))
 	mux.Handle("/v1/models", withRequestID(http.HandlerFunc(modelsHandler)))
 	mux.Handle("/v1/chat/completions", withRequestID(http.HandlerFunc(chatCompletionsHandler)))
+	mux.Handle("/v1/responses", withRequestID(http.HandlerFunc(responsesHandler)))
+	mux.Handle("/v1/messages", withRequestID(http.HandlerFunc(claudeMessagesHandler)))
 
 	addr := ":" + *port
 	slog.Info("server starting", "port", *port, "version", version)
@@ -60,6 +62,12 @@ func main() {
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// logSlogInfo delegates to slog.Info so handlers in other files can log
+// request plans without importing slog directly everywhere.
+func logSlogInfo(msg string, args ...any) {
+	slog.Info(msg, args...)
 }
 
 func modelsHandler(w http.ResponseWriter, r *http.Request) {
