@@ -9,11 +9,21 @@ import (
 
 // dashboardData is the JSON payload served by /dashboard/data.
 type dashboardData struct {
-	GeneratedAt  string                 `json:"generated_at"`
-	RateLimit    *RateLimitConfig       `json:"rate_limit"`
-	RateWindows  map[string]RateStatus  `json:"rate_windows"`
-	UsageEnabled bool                   `json:"usage_enabled"`
-	Usage        map[string]KeyUsage    `json:"usage"`
+	GeneratedAt  string                `json:"generated_at"`
+	RateLimit    *RateLimitConfig      `json:"rate_limit"`
+	RateWindows  map[string]RateStatus `json:"rate_windows"`
+	UsageEnabled bool                  `json:"usage_enabled"`
+	Usage        map[string]KeyUsage   `json:"usage"`
+	Models       []ModelEntry          `json:"models"`
+}
+
+// ModelEntry is a dashboard model row.
+type ModelEntry struct {
+	ID       string `json:"id"`
+	IsFree   bool   `json:"is_free"`
+	IsGo     bool   `json:"is_go"`
+	IsAlias  bool   `json:"is_alias"`
+	Upstream string `json:"upstream,omitempty"`
 }
 
 func dashboardHandler(w http.ResponseWriter, r *http.Request) {
@@ -26,6 +36,7 @@ func dashboardDataHandler(w http.ResponseWriter, r *http.Request) {
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		RateWindows: map[string]RateStatus{},
 		Usage:       map[string]KeyUsage{},
+		Models:      collectModelEntries(),
 	}
 	if rateLimiter != nil {
 		data.RateLimit = &RateLimitConfig{
@@ -41,6 +52,57 @@ func dashboardDataHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
+}
+
+// collectModelEntries builds the dashboard model list from the live catalogs
+// (free Zen + Go), flagging aliases and the upstream ID they resolve to.
+func collectModelEntries() []ModelEntry {
+	modelMu.RLock()
+	free := make([]ModelInfo, len(modelsCache))
+	copy(free, modelsCache)
+	goCat := make([]ModelInfo, len(goModelsCache))
+	copy(goCat, goModelsCache)
+	modelMu.RUnlock()
+
+	configMu.RLock()
+	aliases := make(map[string]string, len(modelAlias))
+	for a, u := range modelAlias {
+		aliases[a] = u
+	}
+	configMu.RUnlock()
+
+	seen := map[string]bool{}
+	var out []ModelEntry
+	add := func(id string, isFree, isGo bool) {
+		if seen[id] {
+			return
+		}
+		seen[id] = true
+		e := ModelEntry{ID: id, IsFree: isFree, IsGo: isGo}
+		if up, ok := aliases[id]; ok {
+			e.IsAlias = true
+			e.Upstream = up
+		}
+		out = append(out, e)
+	}
+	for _, m := range free {
+		add(publicFacingID(m.ID), true, false)
+	}
+	for _, m := range goCat {
+		pid := publicFacingID(m.ID)
+		if seen[pid] {
+			// already listed as free; mark as also-go
+			for i := range out {
+				if out[i].ID == pid {
+					out[i].IsGo = true
+				}
+			}
+			continue
+		}
+		add(pid, false, true)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 // sortedKeys is a helper for stable rendering.
@@ -127,6 +189,26 @@ const dashboardHTML = `<!DOCTYPE html>
   </table>
   <div class="empty" id="empty" style="display:none">No usage yet — send a request to see it here.</div>
 
+  <div style="margin-top:32px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+    <h2 style="font-size:16px;font-weight:600">Models</h2>
+    <div style="display:flex;gap:16px;font-size:12px;color:var(--muted)">
+      <span><span class="dot" style="color:var(--green)">●</span> free</span>
+      <span><span class="dot" style="color:var(--accent)">●</span> Go</span>
+      <span><span class="dot" style="color:var(--yellow)">●</span> alias</span>
+    </div>
+  </div>
+  <table style="margin-top:12px">
+    <thead>
+      <tr>
+        <th>Model</th>
+        <th>Catalog</th>
+        <th>Upstream</th>
+      </tr>
+    </thead>
+    <tbody id="model-rows"></tbody>
+  </table>
+  <div class="empty" id="models-empty" style="display:none">Models not loaded yet — catalogs refresh every 15 min.</div>
+
   <div class="footer" id="footer"></div>
 
 <script>
@@ -178,6 +260,27 @@ async function refresh() {
         '<td class="num">' + last + '</td>' +
         '<td>' + rateCell(rw) + '</td>';
       rows.appendChild(tr);
+    }
+
+    // models table
+    const mrows = document.getElementById('model-rows');
+    mrows.innerHTML = '';
+    const models = d.models || [];
+    const mEmpty = document.getElementById('models-empty');
+    if (!models.length) { mEmpty.style.display = 'block'; }
+    else { mEmpty.style.display = 'none'; }
+    for (const m of models) {
+      const tr = document.createElement('tr');
+      const badges = [];
+      if (m.is_free) badges.push('<span class="badge" style="background:rgba(63,185,80,.12);color:var(--green)">free</span>');
+      if (m.is_go) badges.push('<span class="badge" style="background:rgba(88,166,255,.12);color:var(--accent)">Go</span>');
+      if (m.is_alias) badges.push('<span class="badge" style="background:rgba(210,153,34,.12);color:var(--yellow)">alias</span>');
+      const upstream = m.is_alias ? (m.upstream || '—') : '—';
+      tr.innerHTML =
+        '<td>' + esc(m.id) + '</td>' +
+        '<td>' + (badges.join(' ') || '<span style="color:var(--muted)">—</span>') + '</td>' +
+        '<td style="color:var(--muted)">' + esc(upstream) + '</td>';
+      mrows.appendChild(tr);
     }
     document.getElementById('footer').textContent = 'generated ' + d.generated_at;
   } catch (e) {

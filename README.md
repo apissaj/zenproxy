@@ -23,7 +23,7 @@ Lightweight, single-binary HTTP proxy that exposes [OpenCode Zen](https://openco
 - **Auto catalog refresh**: free + Go catalogs reloaded every 15 minutes
 - **Per-key rate limiting**: sliding-window RPM + TPM limits with `Retry-After` (429), exempt keys
 - **Usage & cost tracking**: per-key token usage with cost estimation, persisted to JSON
-- **Web dashboard**: `/dashboard` — live rate-limit windows, per-key usage, tokens and cost (dark theme, auto-refresh)
+- **Web dashboard**: `/dashboard` — live rate-limit windows, per-key usage, tokens, cost, and full model catalog (dark theme, auto-refresh)
 - **Structured logging**: JSON-adjacent slog output with `X-Request-Id` correlation
 
 ## Quick start
@@ -102,6 +102,7 @@ Open `http://127.0.0.1:8000/dashboard` for a live overview:
 - **Usage tracking** totals (requests, tokens)
 - **Total cost** across all keys
 - Per-key table: requests, tokens, cost, last used, live rate-limit window
+- **Model catalog**: all models from free + Go catalogs, with `free` / `Go` / `alias` badges and upstream resolution
 
 The dashboard auto-refreshes every 5 seconds. Raw JSON is available at `/dashboard/data`.
 
