@@ -1,0 +1,18 @@
+# Binaries
+zenproxy.exe
+zenproxy
+bin/
+
+# Local config with secrets — never commit
+config.json
+*.log
+
+# Go build artifacts
+*.test
+*.out
+
+# Editor/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
