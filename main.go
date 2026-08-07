@@ -31,6 +31,7 @@ func main() {
 
 	cfg := loadConfig(*configPath)
 	applyConfig(cfg)
+	applyRateUsage(cfg)
 	slog.Info("config loaded", "path", *configPath)
 
 	initOCSession()
@@ -43,13 +44,19 @@ func main() {
 			refreshCatalogs()
 		}
 	}()
+	// persist usage periodically
+	if usageStore_ != nil {
+		go usageSaver(usageStore_)
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/health", withRequestID(http.HandlerFunc(healthHandler)))
 	mux.Handle("/v1/models", withRequestID(http.HandlerFunc(modelsHandler)))
-	mux.Handle("/v1/chat/completions", withRequestID(http.HandlerFunc(chatCompletionsHandler)))
-	mux.Handle("/v1/responses", withRequestID(http.HandlerFunc(responsesHandler)))
-	mux.Handle("/v1/messages", withRequestID(http.HandlerFunc(claudeMessagesHandler)))
+	mux.Handle("/v1/chat/completions", withRequestID(withRateLimit(http.HandlerFunc(chatCompletionsHandler))))
+	mux.Handle("/v1/responses", withRequestID(withRateLimit(http.HandlerFunc(responsesHandler))))
+	mux.Handle("/v1/messages", withRequestID(withRateLimit(http.HandlerFunc(claudeMessagesHandler))))
+	mux.Handle("/dashboard", withRequestID(http.HandlerFunc(dashboardHandler)))
+	mux.Handle("/dashboard/data", withRequestID(http.HandlerFunc(dashboardDataHandler)))
 
 	addr := ":" + *port
 	slog.Info("server starting", "port", *port, "version", version)
@@ -150,6 +157,7 @@ func relayNonStream(w http.ResponseWriter, r *http.Request, body []byte, modelID
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(result.body)
+	recordUsageFromBody(apiKeyForRequest(r), result.body)
 }
 
 func relayStream(w http.ResponseWriter, r *http.Request, body []byte, modelID string, auth UpstreamAuth) {
@@ -179,6 +187,8 @@ func relayStream(w http.ResponseWriter, r *http.Request, body []byte, modelID st
 	}
 	flusher.Flush()
 
+	key := apiKeyForRequest(r)
+	var sb strings.Builder
 	scanner := bufio.NewScanner(rc)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -187,9 +197,11 @@ func relayStream(w http.ResponseWriter, r *http.Request, body []byte, modelID st
 			continue
 		}
 		fmt.Fprint(w, line+"\n")
+		sb.WriteString(line + "\n")
 		flusher.Flush()
 	}
 	if err := scanner.Err(); err != nil && err != io.EOF {
 		slog.Error("stream relay error", "request_id", reqID(r.Context()), "error", err)
 	}
+	recordUsageFromStream(key, sb.String())
 }
