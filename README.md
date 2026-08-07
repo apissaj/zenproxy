@@ -21,6 +21,9 @@ Lightweight, single-binary HTTP proxy that exposes [OpenCode Zen](https://openco
 - **Reasoning-effort mapping**: `minimal/medium/high` → upstream values; optional `force_disable_thinking`
 - **OpenCode session emulation**: `x-opencode-session` / `x-opencode-project` headers, auto-refreshed
 - **Auto catalog refresh**: free + Go catalogs reloaded every 15 minutes
+- **Per-key rate limiting**: sliding-window RPM + TPM limits with `Retry-After` (429), exempt keys
+- **Usage & cost tracking**: per-key token usage with cost estimation, persisted to JSON
+- **Web dashboard**: `/dashboard` — live rate-limit windows, per-key usage, tokens and cost (dark theme, auto-refresh)
 - **Structured logging**: JSON-adjacent slog output with `X-Request-Id` correlation
 
 ## Quick start
@@ -72,6 +75,35 @@ curl http://127.0.0.1:8000/v1/messages \
   -H "x-api-key: public" \
   -d '{"model":"mimo-v2.5","max_tokens":1024,"messages":[{"role":"user","content":"hello"}]}'
 ```
+
+## Configuration
+
+All configuration lives in `config.json` (see `config.example.json`):
+
+| Key | Description |
+|---|---|
+| `model_alias` | Friendly names mapped to upstream model IDs |
+| `reasoning_effort_map` | Map `minimal/medium/high` → upstream reasoning effort |
+| `force_disable_thinking` | Force `thinking: disabled` for all requests |
+| `rate_limit.enabled` | Enable per-key rate limiting |
+| `rate_limit.requests_per_minute` | Max requests per key per 60s window |
+| `rate_limit.tokens_per_minute` | Max tokens per key per 60s window |
+| `rate_limit.exempt_keys` | Keys exempt from limits (e.g. `["admin"]`) |
+| `usage.enabled` | Enable per-key usage & cost tracking |
+| `usage.persist_path` | JSON file to persist usage (`usage.json`) |
+| `usage.cost_per_1k_input_tokens` | Cost per 1k input tokens (USD) |
+| `usage.cost_per_1k_output_tokens` | Cost per 1k output tokens (USD) |
+
+## Dashboard
+
+Open `http://127.0.0.1:8000/dashboard` for a live overview:
+
+- **Rate limiting** status and configured limits
+- **Usage tracking** totals (requests, tokens)
+- **Total cost** across all keys
+- Per-key table: requests, tokens, cost, last used, live rate-limit window
+
+The dashboard auto-refreshes every 5 seconds. Raw JSON is available at `/dashboard/data`.
 
 ## Authentication modes
 
