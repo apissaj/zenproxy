@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"log/slog"
 	"os"
 	"sync"
 )
@@ -13,6 +14,21 @@ type AppConfig struct {
 	ForceDisableThinking bool              `json:"force_disable_thinking"`
 	RateLimit            *RateLimitConfig  `json:"rate_limit"`
 	Usage                *UsageConfig      `json:"usage"`
+	KeyAuth              *KeyAuthConfig    `json:"key_auth"`
+	DashboardAuth        *DashboardAuthConfig `json:"dashboard_auth"`
+}
+
+// KeyAuthConfig controls managed API key authentication.
+type KeyAuthConfig struct {
+	Enabled       bool   `json:"enabled"`
+	KeysPath      string `json:"keys_path"`
+	AllowPublic   bool   `json:"allow_public"` // allow unauthenticated public tier
+}
+
+// DashboardAuthConfig protects /dashboard with a token.
+type DashboardAuthConfig struct {
+	Enabled bool   `json:"enabled"`
+	Token   string `json:"token"`
 }
 
 var (
@@ -20,6 +36,9 @@ var (
 	modelAlias           = map[string]string{}
 	reasoningEffortMap   = map[string]string{}
 	forceDisableThinking bool
+	keyAuthAllowPublicFlag bool
+	dashboardAuthEnabled bool
+	dashboardAuthToken   string
 )
 
 func loadConfig(path string) AppConfig {
@@ -84,5 +103,19 @@ func applyRateUsage(cfg AppConfig) {
 			usageStore_.costOut = cfg.Usage.CostPer1KOut
 			usageStore_.mu.Unlock()
 		}
+	}
+}
+
+// initKeyAuth wires the managed key store from config (server mode).
+func initKeyAuth(cfg AppConfig) {
+	if cfg.KeyAuth != nil && cfg.KeyAuth.Enabled {
+		keyStore = NewKeyStore(cfg.KeyAuth.KeysPath, true)
+		keyAuthAllowPublicFlag = cfg.KeyAuth.AllowPublic
+		slog.Info("key auth enabled", "keys_path", cfg.KeyAuth.KeysPath, "allow_public", cfg.KeyAuth.AllowPublic)
+	}
+	if cfg.DashboardAuth != nil && cfg.DashboardAuth.Enabled {
+		dashboardAuthEnabled = true
+		dashboardAuthToken = cfg.DashboardAuth.Token
+		slog.Info("dashboard auth enabled")
 	}
 }

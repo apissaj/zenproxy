@@ -1,0 +1,384 @@
+openapi: 3.0.3
+info:
+  title: zenproxy API
+  description: >
+    OpenAI/Anthropic-compatible proxy for OpenCode Zen models.
+    Serves /v1/chat/completions (OpenAI), /v1/responses (Responses API),
+    /v1/messages (Anthropic Messages API), /v1/models, and a web dashboard.
+  version: 0.4.0
+  license:
+    name: MIT
+servers:
+  - url: http://127.0.0.1:8020
+    description: Local zenproxy instance (default port 8020)
+tags:
+  - name: Chat
+    description: OpenAI-compatible chat completions
+  - name: Responses
+    description: OpenAI Responses API
+  - name: Messages
+    description: Anthropic Messages API
+  - name: Models
+    description: Model catalog
+  - name: Dashboard
+    description: Web dashboard + metrics
+paths:
+  /health:
+    get:
+      tags: [Dashboard]
+      summary: Health check
+      operationId: health
+      responses:
+        "200":
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+  /v1/models:
+    get:
+      tags: [Models]
+      summary: List available models
+      description: Returns the union of free + Go catalogs with client-visible aliases.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Model list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { type: string, example: list }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, example: mimo-v2.5 }
+                        object: { type: string, example: model }
+                        created: { type: integer }
+                        owned_by: { type: string }
+  /v1/chat/completions:
+    post:
+      tags: [Chat]
+      summary: Create a chat completion
+      operationId: createChatCompletion
+      security:
+        - bearerAuth: []
+        - xApiKeyAuth: []
+        - publicTier: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, messages]
+              properties:
+                model: { type: string, example: mimo-v2.5 }
+                messages:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      role: { type: string, enum: [system, user, assistant] }
+                      content: { type: string }
+                stream: { type: boolean, default: false }
+                max_tokens: { type: integer }
+                temperature: { type: number }
+                top_p: { type: number }
+      responses:
+        "200":
+          description: Completion result (OpenAI chat.completion)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  object: { type: string, example: chat.completion }
+                  model: { type: string }
+                  choices:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        index: { type: integer }
+                        message:
+                          type: object
+                          properties:
+                            role: { type: string }
+                            content: { type: string }
+                  usage:
+                    type: object
+                    properties:
+                      prompt_tokens: { type: integer }
+                      completion_tokens: { type: integer }
+                      total_tokens: { type: integer }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/responses:
+    post:
+      tags: [Responses]
+      summary: Create a response (OpenAI Responses API)
+      operationId: createResponse
+      security:
+        - bearerAuth: []
+        - xApiKeyAuth: []
+        - publicTier: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, input]
+              properties:
+                model: { type: string, example: mimo-v2.5 }
+                input:
+                  oneOf:
+                    - type: string
+                    - type: array
+                      items:
+                        type: object
+                stream: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Response object
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  object: { type: string, example: response }
+                  output: { type: array }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/messages:
+    post:
+      tags: [Messages]
+      summary: Create a message (Anthropic Messages API)
+      description: Returns true Anthropic message format, compatible with Claude Code.
+      operationId: createMessage
+      security:
+        - bearerAuth: []
+        - xApiKeyAuth: []
+        - publicTier: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, max_tokens, messages]
+              properties:
+                model: { type: string, example: mimo-v2.5 }
+                max_tokens: { type: integer, example: 1024 }
+                messages:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      role: { type: string, enum: [user, assistant] }
+                      content: { type: string }
+                stream: { type: boolean, default: false }
+                thinking:
+                  type: object
+                  properties:
+                    type: { type: string, enum: [enabled, disabled] }
+                    budget_tokens: { type: integer }
+      responses:
+        "200":
+          description: Anthropic message
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  type: { type: string, example: message }
+                  role: { type: string, example: assistant }
+                  content:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        type: { type: string, example: text }
+                        text: { type: string }
+                  stop_reason: { type: string, example: end_turn }
+                  usage:
+                    type: object
+                    properties:
+                      input_tokens: { type: integer }
+                      output_tokens: { type: integer }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /dashboard:
+    get:
+      tags: [Dashboard]
+      summary: Web dashboard (HTML)
+      security:
+        - dashboardToken: []
+      responses:
+        "200":
+          description: Dashboard HTML page
+          content:
+            text/html:
+              schema: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /dashboard/data:
+    get:
+      tags: [Dashboard]
+      summary: Dashboard metrics JSON
+      security:
+        - dashboardToken: []
+      responses:
+        "200":
+          description: Live metrics (rate windows, usage, keys, models)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  generated_at: { type: string }
+                  rate_limit:
+                    type: object
+                    properties:
+                      enabled: { type: boolean }
+                      requests_per_minute: { type: integer }
+                      tokens_per_minute: { type: integer }
+                  rate_windows:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      properties:
+                        requests: { type: integer }
+                        tokens: { type: integer }
+                        requests_per_minute: { type: integer }
+                        tokens_per_minute: { type: integer }
+                  usage:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      properties:
+                        requests: { type: integer }
+                        prompt_tokens: { type: integer }
+                        completion_tokens: { type: integer }
+                        total_tokens: { type: integer }
+                        cost_usd: { type: number }
+                        last_used: { type: string }
+                  keys:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string }
+                        hash: { type: string }
+                        revoked: { type: boolean }
+                        budget_usd: { type: number }
+                        spend_usd: { type: number }
+                        model_allow:
+                          type: array
+                          items: { type: string }
+                  models:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        is_free: { type: boolean }
+                        is_go: { type: boolean }
+                        is_alias: { type: boolean }
+                        upstream: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        Managed key (zp_...) or OpenCode key (sk-... with optional zen:/go:
+        prefix). Managed keys enforce per-key rate limits, model allowlists,
+        and budget caps.
+    xApiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+      description: Alternative header for the same key.
+    publicTier:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: >
+        Value "public" (or omitted) when key_auth.allow_public=true — uses the
+        free Zen catalog.
+    dashboardToken:
+      type: apiKey
+      in: query
+      name: token
+      description: Admin token for the dashboard (dashboard_auth.token).
+  responses:
+    Unauthorized:
+      description: Invalid or missing API key
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: object
+                properties:
+                  message: { type: string }
+                  type: { type: string, example: authentication_error }
+    Forbidden:
+      description: Budget exceeded or model not allowed
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: object
+                properties:
+                  message: { type: string }
+                  type: { type: string, example: model_not_allowed }
+    RateLimited:
+      description: Rate limit exceeded (sliding 60s window)
+      headers:
+        Retry-After:
+          schema: { type: integer }
+          description: Seconds until the window resets
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: object
+                properties:
+                  message: { type: string, example: rate limit exceeded }
+                  type: { type: string, example: rate_limit_error }
+                  retry_after_seconds: { type: number }
+                  requests_in_window: { type: integer }
+                  tokens_in_window: { type: integer }
+                  requests_limit: { type: integer }
+                  tokens_limit: { type: integer }

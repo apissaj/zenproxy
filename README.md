@@ -24,6 +24,9 @@ Lightweight, single-binary HTTP proxy that exposes [OpenCode Zen](https://openco
 - **Per-key rate limiting**: sliding-window RPM + TPM limits with `Retry-After` (429), exempt keys
 - **Usage & cost tracking**: per-key token usage with cost estimation, persisted to JSON
 - **Web dashboard**: `/dashboard` — live rate-limit windows, per-key usage, tokens, cost, and full model catalog (dark theme, auto-refresh)
+- **API key management**: create/revoke keys via CLI with SHA-256 hashed storage, per-key model allowlists and budget caps
+- **Dashboard auth**: protect `/dashboard` with an admin token
+- **OpenAPI spec**: `openapi.yaml` — import into Postman/Insomnia or generate clients
 - **Structured logging**: JSON-adjacent slog output with `X-Request-Id` correlation
 
 ## Quick start
@@ -93,6 +96,35 @@ All configuration lives in `config.json` (see `config.example.json`):
 | `usage.persist_path` | JSON file to persist usage (`usage.json`) |
 | `usage.cost_per_1k_input_tokens` | Cost per 1k input tokens (USD) |
 | `usage.cost_per_1k_output_tokens` | Cost per 1k output tokens (USD) |
+| `key_auth.enabled` | Enable managed API key authentication |
+| `key_auth.keys_path` | JSON file storing key hashes (`keys.json`) |
+| `key_auth.allow_public` | Allow unauthenticated public tier (free models) |
+| `dashboard_auth.enabled` | Protect `/dashboard` with a token |
+| `dashboard_auth.token` | Admin token for the dashboard |
+
+## API Key Management
+
+Create, list, and revoke keys with the CLI (server must have `key_auth.enabled`):
+
+```bash
+# create a key with a model allowlist and monthly budget
+./zenproxy key create alice --allow mimo-v2.5,deepseek-v4-flash --budget 5.0
+
+# create a key with custom rate limits
+./zenproxy key create bob --rpm 30 --tpm 50000
+
+# list all keys (name, status, budget, spend, models)
+./zenproxy key list
+
+# revoke a key (takes effect within ~10s, hot-reload)
+./zenproxy key revoke alice
+```
+
+Keys are stored as **SHA-256 hashes** only — the raw `zp_...` key is shown once at creation. Per-key model allowlists return `403 model_not_allowed`; budget caps return `403 budget_exceeded` when spend reaches the limit.
+
+## API Reference
+
+Full OpenAPI spec: [`openapi.yaml`](openapi.yaml) — import into Postman/Insomnia or use with code generators.
 
 ## Dashboard
 

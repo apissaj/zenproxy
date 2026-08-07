@@ -15,6 +15,18 @@ type dashboardData struct {
 	UsageEnabled bool                  `json:"usage_enabled"`
 	Usage        map[string]KeyUsage   `json:"usage"`
 	Models       []ModelEntry          `json:"models"`
+	Keys         []KeyEntry            `json:"keys"`
+}
+
+// KeyEntry is a dashboard key row (managed key store).
+type KeyEntry struct {
+	Name      string   `json:"name"`
+	Hash      string   `json:"hash"`
+	CreatedAt string   `json:"created_at"`
+	Revoked   bool     `json:"revoked"`
+	ModelAllow []string `json:"model_allow,omitempty"`
+	BudgetUSD float64  `json:"budget_usd,omitempty"`
+	SpendUSD  float64  `json:"spend_usd,omitempty"`
 }
 
 // ModelEntry is a dashboard model row.
@@ -37,6 +49,7 @@ func dashboardDataHandler(w http.ResponseWriter, r *http.Request) {
 		RateWindows: map[string]RateStatus{},
 		Usage:       map[string]KeyUsage{},
 		Models:      collectModelEntries(),
+		Keys:        collectKeyEntries(),
 	}
 	if rateLimiter != nil {
 		data.RateLimit = &RateLimitConfig{
@@ -102,6 +115,27 @@ func collectModelEntries() []ModelEntry {
 		add(pid, false, true)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// collectKeyEntries lists managed keys with live spend (dashboard).
+func collectKeyEntries() []KeyEntry {
+	if keyStore == nil {
+		return nil
+	}
+	var out []KeyEntry
+	for _, rec := range keyStore.List() {
+		e := KeyEntry{
+			Name:      rec.Name,
+			Hash:      rec.Hash[:12] + "…",
+			CreatedAt: rec.CreatedAt.Format(time.RFC3339),
+			Revoked:   rec.Revoked,
+			ModelAllow: rec.ModelAllow,
+			BudgetUSD: rec.BudgetUSD,
+			SpendUSD:  activeSpendUSD(rec),
+		}
+		out = append(out, e)
+	}
 	return out
 }
 
@@ -190,6 +224,25 @@ const dashboardHTML = `<!DOCTYPE html>
   <div class="empty" id="empty" style="display:none">No usage yet — send a request to see it here.</div>
 
   <div style="margin-top:32px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+    <h2 style="font-size:16px;font-weight:600">API Keys</h2>
+    <span style="font-size:12px;color:var(--muted)">managed keys · budget &amp; allowlist</span>
+  </div>
+  <table style="margin-top:12px">
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Hash</th>
+        <th>Status</th>
+        <th class="num">Budget</th>
+        <th class="num">Spend</th>
+        <th>Models</th>
+      </tr>
+    </thead>
+    <tbody id="key-rows"></tbody>
+  </table>
+  <div class="empty" id="keys-empty" style="display:none">Key management disabled or no keys yet — use <code>zenproxy key create</code>.</div>
+
+  <div style="margin-top:32px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
     <h2 style="font-size:16px;font-weight:600">Models</h2>
     <div style="display:flex;gap:16px;font-size:12px;color:var(--muted)">
       <span><span class="dot" style="color:var(--green)">●</span> free</span>
@@ -260,6 +313,31 @@ async function refresh() {
         '<td class="num">' + last + '</td>' +
         '<td>' + rateCell(rw) + '</td>';
       rows.appendChild(tr);
+    }
+
+    // keys table
+    const krows = document.getElementById('key-rows');
+    krows.innerHTML = '';
+    const keysList = d.keys || [];
+    const kEmpty = document.getElementById('keys-empty');
+    if (!keysList.length) { kEmpty.style.display = 'block'; }
+    else { kEmpty.style.display = 'none'; }
+    for (const k of keysList) {
+      const tr = document.createElement('tr');
+      const status = k.revoked
+        ? '<span class="badge" style="background:rgba(248,81,73,.12);color:var(--red)">revoked</span>'
+        : '<span class="badge" style="background:rgba(63,185,80,.12);color:var(--green)">active</span>';
+      const models = k.model_allow && k.model_allow.length ? k.model_allow.join(', ') : '<span style="color:var(--muted)">all</span>';
+      const budget = k.budget_usd ? '$' + k.budget_usd.toFixed(2) : '<span style="color:var(--muted)">∞</span>';
+      const spend = '<span class="' + (k.budget_usd && k.spend_usd >= k.budget_usd ? 'limited' : '') + '">$' + (k.spend_usd || 0).toFixed(4) + '</span>';
+      tr.innerHTML =
+        '<td>' + esc(k.name) + '</td>' +
+        '<td class="key" title="' + esc(k.hash) + '">' + esc(k.hash) + '</td>' +
+        '<td>' + status + '</td>' +
+        '<td class="num">' + budget + '</td>' +
+        '<td class="num">' + spend + '</td>' +
+        '<td style="color:var(--muted)">' + models + '</td>';
+      krows.appendChild(tr);
     }
 
     // models table
