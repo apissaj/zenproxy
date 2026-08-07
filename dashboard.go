@@ -267,7 +267,10 @@ const dashboardHTML = `<!DOCTYPE html>
 <script>
 async function refresh() {
   try {
-    const r = await fetch('/dashboard/data');
+    // forward ?token=... (dashboard auth) from the page URL to the data endpoint
+    const q = location.search || '';
+    const r = await fetch('/dashboard/data' + q);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
     document.getElementById('version').textContent = 'v' + (d.version || '');
     const rl = document.getElementById('rl-status');
