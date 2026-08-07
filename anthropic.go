@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 )
@@ -40,6 +41,15 @@ func claudeToOpenAI(req ClaudeRequest) *OpenAIRequest {
 	}
 	if req.TopP != nil {
 		chat.TopP = req.TopP
+	}
+	// Anthropic thinking config: if the client explicitly sent `thinking`,
+	// forward it. Otherwise default to disabled — Anthropic Messages API
+	// does not enable reasoning unless asked, and reasoning eats the
+	// max_tokens budget (empty text responses).
+	if len(req.Thinking) > 0 {
+		chat.Thinking = req.Thinking
+	} else {
+		chat.Thinking = json.RawMessage(`{"type":"disabled"}`)
 	}
 	if len(req.System) > 0 {
 		var sysText string
@@ -228,16 +238,60 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	upstreamBody := buildUpstreamBody(chatReq)
 
 	if chatReq.Stream {
-		// The upstream (OpenCode Zen) always returns OpenAI-format SSE
-		// chunks, even for /v1/messages. Relay them directly — the client
-		// already speaks OpenAI chat.completion.chunk at the SSE level;
-		// the JSON envelope is what we map to Anthropic below.
-		relayStream(w, r, upstreamBody, chatReq.Model, auth)
+		// Anthropic streaming: convert OpenAI SSE chunks to Anthropic events.
+		rc, header, err := callUpstreamStream(r.Context(), upstreamBody, chatReq.Model, auth)
+		if err != nil {
+			if se, ok := err.(upstreamStatusError); ok {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(se.status)
+				w.Write(se.body)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer rc.Close()
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		if ct := header.Get("Content-Type"); ct != "" {
+			w.Header().Set("Content-Type", ct)
+		}
+		flusher.Flush()
+
+		aw := newAnthropicStreamWriter(w, flusher, chatReq.Model)
+		if err := aw.drain(rc); err != nil {
+			slog.Error("anthropic stream convert error", "request_id", reqID(r.Context()), "error", err)
+		}
 		return
 	}
 
-	// Non-stream: relay upstream body as-is (OpenAI chat.completion JSON).
-	relayNonStream(w, r, upstreamBody, chatReq.Model, auth)
+	// Non-stream: convert OpenAI chat.completion -> Anthropic message.
+	result, err := callUpstream(r.Context(), upstreamBody, chatReq.Model, auth)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	if result.status != http.StatusOK {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(result.status)
+		w.Write(result.body)
+		return
+	}
+	conv, convErr := openaiToAnthropicMessage(result.body)
+	if convErr != nil {
+		slog.Error("anthropic convert error", "request_id", reqID(r.Context()), "error", convErr)
+		http.Error(w, "failed to convert response", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(conv)
 }
 
 // slogInfo is a tiny helper to keep the anthropic handler log line short.

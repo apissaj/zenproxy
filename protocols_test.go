@@ -112,3 +112,89 @@ func TestFlattenClaudeContent(t *testing.T) {
 		t.Fatalf("plain: %q", got)
 	}
 }
+
+func TestOpenAIToAnthropicMessage(t *testing.T) {
+	openAI := []byte(`{
+		"id":"gen-1","object":"chat.completion","created":1786000000,"model":"mimo-v2.5-free",
+		"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hello world"}}],
+		"usage":{"prompt_tokens":10,"completion_tokens":5}
+	}`)
+	out, err := openaiToAnthropicMessage(openAI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msg map[string]any
+	if err := json.Unmarshal(out, &msg); err != nil {
+		t.Fatal(err)
+	}
+	if msg["type"] != "message" || msg["role"] != "assistant" {
+		t.Fatalf("envelope: %+v", msg)
+	}
+	content, _ := msg["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("content blocks: %+v", content)
+	}
+	block := content[0].(map[string]any)
+	if block["type"] != "text" || block["text"] != "hello world" {
+		t.Fatalf("block: %+v", block)
+	}
+	if msg["stop_reason"] != "end_turn" {
+		t.Fatalf("stop_reason: %v", msg["stop_reason"])
+	}
+	usage := msg["usage"].(map[string]any)
+	if usage["input_tokens"] != float64(10) || usage["output_tokens"] != float64(5) {
+		t.Fatalf("usage: %+v", usage)
+	}
+}
+
+func TestOpenAIToAnthropicMaxTokens(t *testing.T) {
+	openAI := []byte(`{
+		"id":"gen-2","object":"chat.completion","model":"mimo-v2.5-free",
+		"choices":[{"index":0,"finish_reason":"length","message":{"role":"assistant","content":"cut off"}}],
+		"usage":{"prompt_tokens":1,"completion_tokens":100}
+	}`)
+	out, err := openaiToAnthropicMessage(openAI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msg map[string]any
+	_ = json.Unmarshal(out, &msg)
+	if msg["stop_reason"] != "max_tokens" {
+		t.Fatalf("stop_reason should be max_tokens, got %v", msg["stop_reason"])
+	}
+}
+
+func TestAnthropicStreamWriterEvents(t *testing.T) {
+	var out strings.Builder
+	flusher := &nopFlusher{}
+	aw := newAnthropicStreamWriter(&out, flusher, "mimo-v2.5-free")
+
+	chunk1 := `{"id":"gen-3","model":"mimo-v2.5-free","choices":[{"index":0,"delta":{"content":"Hel"}}]}`
+	chunk2 := `{"id":"gen-3","model":"mimo-v2.5-free","choices":[{"index":0,"delta":{"content":"lo"}}]}`
+	chunk3 := `{"id":"gen-3","model":"mimo-v2.5-free","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`
+
+	for _, c := range []string{chunk1, chunk2, chunk3} {
+		if err := aw.handleChunk(c); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s := out.String()
+	for _, want := range []string{
+		"event: message_start",
+		"event: content_block_start",
+		`"text":"Hel"`,
+		`"text":"lo"`,
+		"event: content_block_stop",
+		`"stop_reason":"end_turn"`,
+		"event: message_stop",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %q in:\n%s", want, s)
+		}
+	}
+}
+
+type nopFlusher struct{}
+
+func (n *nopFlusher) Flush() {}
