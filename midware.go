@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // Global rate limiter and usage store, wired from config at startup.
@@ -47,15 +48,107 @@ func withRateLimit(next http.Handler) http.Handler {
 	})
 }
 
-// apiKeyForRequest resolves the identity used for rate limiting / usage.
-// Prefixed keys (zen:/go:) are normalized to the bare token so a single
-// key counts once regardless of tier prefix.
-func apiKeyForRequest(r *http.Request) string {
-	auth := extractUpstreamAuth(r)
-	if auth.Mode == AuthRoutePublic {
-		return "public"
+// withKeyAuth enforces managed API key authentication when enabled.
+// - key_auth.enabled=false: pass-through (existing behavior)
+// - key_auth.allow_public=true: "public" / no key uses public tier
+// - otherwise: only registered keys allowed, with model allowlist + budget cap
+func withKeyAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if keyStore == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		identity, rec := resolveIdentity(r)
+		if rec == nil {
+			// no managed key — allow public tier if open, or valid upstream
+			// OpenCode credentials (sk-* with optional zen:/go: prefix).
+			if identity == "public" && keyAuthAllowPublic() {
+				next.ServeHTTP(w, r)
+				return
+			}
+			upstream := strings.TrimPrefix(identity, "zen:")
+			upstream = strings.TrimPrefix(upstream, "go:")
+			if isValidOpenCodeKey(upstream) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			writeAPIError(w, http.StatusUnauthorized, "invalid or revoked API key", "authentication_error", nil)
+			return
+		}
+		// budget cap
+		if rec.BudgetUSD > 0 {
+			spend := activeSpendUSD(rec)
+			if spend >= rec.BudgetUSD {
+				writeAPIError(w, http.StatusForbidden, "budget exceeded", "budget_exceeded", map[string]any{
+					"budget_usd": rec.BudgetUSD,
+					"spent_usd":  spend,
+				})
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// resolveIdentity maps a request to its identity string and managed key record.
+// Priority: managed key (zp_...) > OpenCode tier key (sk-... with zen:/go: prefix)
+// > public. The identity string is used for rate limiting + usage tracking.
+func resolveIdentity(r *http.Request) (string, *ProxyKey) {
+	token := ""
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") {
+		token = strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
 	}
-	return auth.Token
+	if token == "" {
+		token = strings.TrimSpace(r.Header.Get("x-api-key"))
+	}
+	if token == "" || token == "public" {
+		return "public", nil
+	}
+	if keyStore != nil {
+		// managed keys use zp_ prefix (or bare); exact match required
+		if rec := keyStore.Lookup(token); rec != nil {
+			return rec.Hash, rec
+		}
+		// a zp_-prefixed token that isn't registered is INVALID — do not
+		// fall through to public/OpenCode semantics.
+		if strings.HasPrefix(token, "zp_") {
+			return token, nil
+		}
+	}
+	// fall back to OpenCode tier semantics (zen:/go:/bare sk-)
+	ua := extractUpstreamAuth(r)
+	if ua.Mode != AuthRoutePublic {
+		return ua.Token, nil
+	}
+	return "public", nil
+}
+
+// apiKeyForRequest resolves the identity used for rate limiting / usage.
+func apiKeyForRequest(r *http.Request) string {
+	id, _ := resolveIdentity(r)
+	return id
+}
+
+// keyAuthAllowPublic reads the allow_public config flag (set at startup).
+func keyAuthAllowPublic() bool {
+	return keyAuthAllowPublicFlag
+}
+
+// writeAPIError emits a standard OpenAI-style error JSON.
+func writeAPIError(w http.ResponseWriter, status int, message, typ string, extra map[string]any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	body := map[string]any{
+		"error": map[string]any{
+			"message": message,
+			"type":    typ,
+		},
+	}
+	for k, v := range extra {
+		body["error"].(map[string]any)[k] = v
+	}
+	json.NewEncoder(w).Encode(body)
 }
 
 // estimatePromptTokens gives a cheap estimate of the request size in tokens
@@ -106,4 +199,89 @@ func itoa(n int) string {
 		b[i] = '-'
 	}
 	return string(b[i:])
+}
+
+// helper: is this string a known managed key (for logging)?
+func isManagedKey(token string) bool {
+	if keyStore == nil {
+		return false
+	}
+	return keyStore.Lookup(token) != nil
+}
+
+// withDashboardAuth protects /dashboard when dashboard_auth.enabled=true.
+// Token passed via ?token= or Authorization: Bearer <token> or x-dashboard-token.
+func withDashboardAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !dashboardAuthEnabled {
+			next.ServeHTTP(w, r)
+			return
+		}
+		token := r.URL.Query().Get("token")
+		if token == "" {
+			auth := r.Header.Get("Authorization")
+			if strings.HasPrefix(auth, "Bearer ") {
+				token = strings.TrimPrefix(auth, "Bearer ")
+			}
+		}
+		if token == "" {
+			token = r.Header.Get("x-dashboard-token")
+		}
+		if token != "" && token == dashboardAuthToken {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "dashboard authentication required",
+				"type":    "authentication_error",
+			},
+		})
+	})
+}
+
+// withKeyLimits enforces per-key model allowlist + budget when key auth is on.
+func withKeyLimits(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if keyStore == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		_, rec := resolveIdentity(r)
+		if rec != nil && len(rec.ModelAllow) > 0 {
+			// parse requested model from body
+			body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+			if err != nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			var req struct {
+				Model string `json:"model"`
+			}
+			json.Unmarshal(body, &req)
+			model := req.Model
+			// strip ZP/ prefix (9Router)
+			if idx := strings.Index(model, "/"); idx >= 0 {
+				model = model[idx+1:]
+			}
+			allowed := false
+			for _, m := range rec.ModelAllow {
+				if m == model || m == "*" {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				writeAPIError(w, http.StatusForbidden, "model not allowed for this key", "model_not_allowed", map[string]any{
+					"model":   req.Model,
+					"allowed": rec.ModelAllow,
+				})
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }

@@ -15,6 +15,9 @@ import (
 
 const version = "0.1.0"
 
+// keyStore is the managed API key store (nil if key_auth disabled).
+var keyStore *KeyStore
+
 func main() {
 	port := flag.String("port", "8000", "server port")
 	configPath := flag.String("config", "config.json", "config file path")
@@ -27,11 +30,27 @@ func main() {
 		return
 	}
 
+	// CLI subcommand: zenproxy key create/list/revoke
+	if flag.NArg() > 0 && flag.Arg(0) == "key" {
+		cfg := loadConfig(*configPath)
+		applyConfig(cfg)
+		applyRateUsage(cfg)
+		if cfg.KeyAuth != nil && cfg.KeyAuth.Enabled {
+			keyStore = NewKeyStore(cfg.KeyAuth.KeysPath, true)
+		}
+		if keyStore == nil {
+			fmt.Fprintln(os.Stderr, "key management disabled (key_auth.enabled=false in config)")
+			os.Exit(2)
+		}
+		os.Exit(keyCLI(flag.Args()[1:]))
+	}
+
 	setupLogger(*logLevel)
 
 	cfg := loadConfig(*configPath)
 	applyConfig(cfg)
 	applyRateUsage(cfg)
+	initKeyAuth(cfg)
 	slog.Info("config loaded", "path", *configPath)
 
 	initOCSession()
@@ -48,15 +67,19 @@ func main() {
 	if usageStore_ != nil {
 		go usageSaver(usageStore_)
 	}
+	// hot-reload managed keys from disk (CLI changes take effect live)
+	if keyStore != nil {
+		go keyReloader(keyStore)
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/health", withRequestID(http.HandlerFunc(healthHandler)))
 	mux.Handle("/v1/models", withRequestID(http.HandlerFunc(modelsHandler)))
-	mux.Handle("/v1/chat/completions", withRequestID(withRateLimit(http.HandlerFunc(chatCompletionsHandler))))
-	mux.Handle("/v1/responses", withRequestID(withRateLimit(http.HandlerFunc(responsesHandler))))
-	mux.Handle("/v1/messages", withRequestID(withRateLimit(http.HandlerFunc(claudeMessagesHandler))))
-	mux.Handle("/dashboard", withRequestID(http.HandlerFunc(dashboardHandler)))
-	mux.Handle("/dashboard/data", withRequestID(http.HandlerFunc(dashboardDataHandler)))
+	mux.Handle("/v1/chat/completions", withRequestID(withKeyAuth(withKeyLimits(withRateLimit(http.HandlerFunc(chatCompletionsHandler))))))
+	mux.Handle("/v1/responses", withRequestID(withKeyAuth(withKeyLimits(withRateLimit(http.HandlerFunc(responsesHandler))))))
+	mux.Handle("/v1/messages", withRequestID(withKeyAuth(withKeyLimits(withRateLimit(http.HandlerFunc(claudeMessagesHandler))))))
+	mux.Handle("/dashboard", withRequestID(withDashboardAuth(http.HandlerFunc(dashboardHandler))))
+	mux.Handle("/dashboard/data", withRequestID(withDashboardAuth(http.HandlerFunc(dashboardDataHandler))))
 
 	addr := ":" + *port
 	slog.Info("server starting", "port", *port, "version", version)

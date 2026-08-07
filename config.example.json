@@ -27,5 +27,16 @@
     "max_keys": 1000,
     "cost_per_1k_input_tokens": 0.001,
     "cost_per_1k_output_tokens": 0.002
+  },
+
+  "key_auth": {
+    "enabled": true,
+    "keys_path": "keys.json",
+    "allow_public": true
+  },
+
+  "dashboard_auth": {
+    "enabled": true,
+    "token": "change-me-admin-token"
   }
 }

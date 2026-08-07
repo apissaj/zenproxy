@@ -8,6 +8,7 @@ zenproxy.exe~
 config.json
 *.log
 usage.json
+keys.json
 
 # Go build artifacts
 *.test
