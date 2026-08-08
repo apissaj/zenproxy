@@ -16,8 +16,11 @@ var (
 
 // withRateLimit enforces the per-key rate limit before the handler runs.
 // It uses the resolved API key (or "public" for unauthenticated traffic)
-// as the identity, estimates prompt tokens from the body, and returns
-// 429 with a Retry-After header when the window is exceeded.
+// as the identity, and returns 429 with a Retry-After header when the
+// request window is exceeded. Token usage is enforced on RECORD (actual
+// usage from upstream responses), not on pre-flight body-size estimates —
+// this avoids false 429s on large prompts (base64/code/padding estimate
+// ~4x too high with len/4).
 func withRateLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if rateLimiter == nil {
@@ -25,8 +28,9 @@ func withRateLimit(next http.Handler) http.Handler {
 			return
 		}
 		key := apiKeyForRequest(r)
-		estTokens := estimatePromptTokens(r)
-		st := rateLimiter.Check(key, estTokens)
+		// pre-flight check uses only the request count; token budget is
+		// enforced post-hoc on real usage (see recordUsageFromBody/Stream).
+		st := rateLimiter.Check(key, 0)
 		if st.Limited {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Retry-After", formatRetryAfter(st.RetryAfter))
@@ -149,23 +153,6 @@ func writeAPIError(w http.ResponseWriter, status int, message, typ string, extra
 		body["error"].(map[string]any)[k] = v
 	}
 	json.NewEncoder(w).Encode(body)
-}
-
-// estimatePromptTokens gives a cheap estimate of the request size in tokens
-// (~4 chars/token) for pre-flight rate limiting. Actual usage is recorded
-// after the upstream responds.
-// It reads the body safely, then RESTORES it so the handler sees the full body.
-func estimatePromptTokens(r *http.Request) int64 {
-	if r.Body == nil {
-		return 0
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil {
-		return 0
-	}
-	// restore body for the handler
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	return int64(len(body)) / 4
 }
 
 func formatRetryAfter(seconds float64) string {
