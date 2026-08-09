@@ -90,7 +90,7 @@ func (a UpstreamAuth) authHeader() string {
 // poolAuthHeader returns the auth header using a pooled key when available.
 // Falls back to the default authHeader when the pool is disabled or empty.
 func poolAuthHeader(auth UpstreamAuth) (string, string, bool) {
-	if upstreamPool == nil {
+	if upstreamPool == nil || upstreamPool.Len() == 0 {
 		return auth.authHeader(), auth.Source, true
 	}
 	token, alias, ok := upstreamPool.Next()
