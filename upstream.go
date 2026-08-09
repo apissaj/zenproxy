@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -77,6 +78,7 @@ type upstreamResult struct {
 }
 
 // callUpstream posts a chat-completion style request to OpenCode Zen.
+// Uses the upstream key pool when enabled (failover on 429/402).
 func callUpstream(ctx context.Context, body []byte, modelID string, auth UpstreamAuth) (upstreamResult, error) {
 	initOCSession()
 	var bodyMap map[string]any
@@ -93,45 +95,75 @@ func callUpstream(ctx context.Context, body []byte, modelID string, auth Upstrea
 	if err != nil {
 		return upstreamResult{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
-	if err != nil {
-		return upstreamResult{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", auth.authHeader())
-	req.Header.Set("User-Agent", "opencode/"+ocClientVer)
-	req.Header.Set("x-opencode-client", "cli")
-	req.Header.Set("x-opencode-project", ocProjectID)
-	req.Header.Set("x-opencode-session", ocSessionID)
-	req.Header.Set("x-opencode-request", "req_"+randomString(24))
-	req.Header.Set("Accept", "application/json")
 
-	start := time.Now()
-	resp, err := upstreamClient.Do(req)
-	if err != nil {
-		slog.Error("upstream transport error", "request_id", reqID(ctx), "model", modelID, "error", err)
-		return upstreamResult{}, err
+	// attempt across pool keys (or a single attempt when pool disabled)
+	maxAttempts := 1
+	if upstreamPool != nil {
+		maxAttempts = upstreamPool.Len()
+		if maxAttempts < 1 {
+			maxAttempts = 1
+		}
 	}
-	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 50*1024*1024))
-	if err != nil {
-		return upstreamResult{}, err
+	var lastErr error
+	var lastRes upstreamResult
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		authHeader, alias, ok := poolAuthHeader(auth)
+		if !ok {
+			break
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
+		if err != nil {
+			return upstreamResult{}, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", authHeader)
+		req.Header.Set("User-Agent", "opencode/"+ocClientVer)
+		req.Header.Set("x-opencode-client", "cli")
+		req.Header.Set("x-opencode-project", ocProjectID)
+		req.Header.Set("x-opencode-session", ocSessionID)
+		req.Header.Set("x-opencode-request", "req_"+randomString(24))
+		req.Header.Set("Accept", "application/json")
+
+		start := time.Now()
+		resp, err := upstreamClient.Do(req)
+		if err != nil {
+			slog.Error("upstream transport error", "request_id", reqID(ctx), "model", modelID, "key", alias, "error", err)
+			lastErr = err
+			continue
+		}
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, 50*1024*1024))
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		slog.Info("upstream_attempt",
+			"request_id", reqID(ctx), "model", modelID, "key", alias, "status", resp.StatusCode,
+			"duration_ms", time.Since(start).Milliseconds())
+		// failover on quota/rate errors
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusPaymentRequired {
+			upstreamPool.MarkExhausted(trimToken(strings.TrimPrefix(authHeader, "Bearer ")), fmt.Sprintf("status %d: %s", resp.StatusCode, truncate(string(respBody), 120)))
+			lastRes = upstreamResult{status: resp.StatusCode, body: respBody, header: resp.Header}
+			lastErr = upstreamStatusError{status: resp.StatusCode, body: respBody}
+			continue
+		}
+		lastRes = upstreamResult{status: resp.StatusCode, body: respBody, header: resp.Header}
+		lastErr = nil
+		break
 	}
-	slog.Info("upstream_attempt",
-		"request_id", reqID(ctx), "model", modelID, "status", resp.StatusCode,
-		"duration_ms", time.Since(start).Milliseconds())
-	if resp.StatusCode != http.StatusOK {
-		return upstreamResult{status: resp.StatusCode, body: respBody, header: resp.Header}, nil
+	if lastErr != nil {
+		return upstreamResult{}, lastErr
 	}
-	return upstreamResult{status: resp.StatusCode, body: respBody, header: resp.Header}, nil
+	return lastRes, nil
 }
 
 // callUpstreamStream keeps the response body open for SSE relay.
-func callUpstreamStream(ctx context.Context, body []byte, modelID string, auth UpstreamAuth) (io.ReadCloser, http.Header, error) {
+// Uses the upstream key pool when enabled (failover on 429/402).
+func callUpstreamStream(ctx context.Context, body []byte, modelID string, auth UpstreamAuth) (io.ReadCloser, http.Header, string, error) {
 	initOCSession()
 	var bodyMap map[string]any
 	if err := json.Unmarshal(body, &bodyMap); err != nil {
-		return nil, nil, fmt.Errorf("invalid request body")
+		return nil, nil, "", fmt.Errorf("invalid request body")
 	}
 	useGo := auth.useGoEndpoint(modelID)
 	url := "https://opencode.ai/zen/v1/chat/completions"
@@ -141,32 +173,55 @@ func callUpstreamStream(ctx context.Context, body []byte, modelID string, auth U
 	bodyMap["model"] = modelID
 	raw, err := json.Marshal(bodyMap)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
-	if err != nil {
-		return nil, nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", auth.authHeader())
-	req.Header.Set("User-Agent", "opencode/"+ocClientVer)
-	req.Header.Set("x-opencode-client", "cli")
-	req.Header.Set("x-opencode-project", ocProjectID)
-	req.Header.Set("x-opencode-session", ocSessionID)
-	req.Header.Set("x-opencode-request", "req_"+randomString(24))
-	req.Header.Set("Accept", "text/event-stream")
 
-	resp, err := upstreamClient.Do(req)
-	if err != nil {
-		slog.Error("upstream stream transport error", "request_id", reqID(ctx), "model", modelID, "error", err)
-		return nil, nil, err
+	maxAttempts := 1
+	if upstreamPool != nil {
+		maxAttempts = upstreamPool.Len()
+		if maxAttempts < 1 {
+			maxAttempts = 1
+		}
 	}
-	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
-		return nil, resp.Header, upstreamStatusError{status: resp.StatusCode, body: b}
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		authHeader, alias, ok := poolAuthHeader(auth)
+		if !ok {
+			break
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
+		if err != nil {
+			return nil, nil, "", err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", authHeader)
+		req.Header.Set("User-Agent", "opencode/"+ocClientVer)
+		req.Header.Set("x-opencode-client", "cli")
+		req.Header.Set("x-opencode-project", ocProjectID)
+		req.Header.Set("x-opencode-session", ocSessionID)
+		req.Header.Set("x-opencode-request", "req_"+randomString(24))
+		req.Header.Set("Accept", "text/event-stream")
+
+		resp, err := upstreamClient.Do(req)
+		if err != nil {
+			slog.Error("upstream stream transport error", "request_id", reqID(ctx), "model", modelID, "key", alias, "error", err)
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
+			resp.Body.Close()
+			// failover on quota/rate errors
+			if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusPaymentRequired {
+				upstreamPool.MarkExhausted(trimToken(strings.TrimPrefix(authHeader, "Bearer ")), fmt.Sprintf("status %d: %s", resp.StatusCode, truncate(string(body), 120)))
+				lastErr = upstreamStatusError{status: resp.StatusCode, body: body}
+				continue
+			}
+			return nil, resp.Header, "", upstreamStatusError{status: resp.StatusCode, body: body}
+		}
+		return resp.Body, resp.Header, alias, nil
 	}
-	return resp.Body, resp.Header, nil
+	return nil, nil, "", lastErr
 }
 
 type upstreamStatusError struct {
@@ -181,3 +236,10 @@ func (e upstreamStatusError) Error() string {
 type statusError int
 
 func (s statusError) Error() string { return fmt.Sprintf("upstream status %d", int(s)) }
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}

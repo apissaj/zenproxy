@@ -87,6 +87,19 @@ func (a UpstreamAuth) authHeader() string {
 	return "Bearer " + a.Token
 }
 
+// poolAuthHeader returns the auth header using a pooled key when available.
+// Falls back to the default authHeader when the pool is disabled or empty.
+func poolAuthHeader(auth UpstreamAuth) (string, string, bool) {
+	if upstreamPool == nil {
+		return auth.authHeader(), auth.Source, true
+	}
+	token, alias, ok := upstreamPool.Next()
+	if !ok {
+		return "", "", false
+	}
+	return "Bearer " + token, "pool:" + alias, true
+}
+
 // useGoEndpoint decides whether the request targets the Go catalog endpoint.
 func (a UpstreamAuth) useGoEndpoint(modelID string) bool {
 	switch a.Mode {

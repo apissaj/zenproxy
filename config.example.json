@@ -37,6 +37,15 @@
 
   "dashboard_auth": {
     "enabled": true,
-    "token": "change-me-admin-token"
+    "token": "admin-secret-123"
+  },
+
+  "upstream_pool": {
+    "enabled": true,
+    "keys": [
+      "sk-your-main-key-here",
+      "sk-your-backup-key-here"
+    ],
+    "cooldown_secs": 60
   }
 }
