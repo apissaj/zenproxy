@@ -239,7 +239,7 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 
 	if chatReq.Stream {
 		// Anthropic streaming: convert OpenAI SSE chunks to Anthropic events.
-		rc, header, err := callUpstreamStream(r.Context(), upstreamBody, chatReq.Model, auth)
+		rc, header, alias, err := callUpstreamStream(r.Context(), upstreamBody, chatReq.Model, auth)
 		if err != nil {
 			if se, ok := err.(upstreamStatusError); ok {
 				w.Header().Set("Content-Type", "application/json")
@@ -251,6 +251,8 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer rc.Close()
+
+		slog.Debug("anthropic stream started", "request_id", reqID(r.Context()), "model", chatReq.Model, "key", alias)
 
 		flusher, ok := w.(http.Flusher)
 		if !ok {

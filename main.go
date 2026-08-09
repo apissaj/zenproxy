@@ -18,6 +18,9 @@ const version = "0.1.0"
 // keyStore is the managed API key store (nil if key_auth disabled).
 var keyStore *KeyStore
 
+// upstreamPool is the multi-key rotation pool (nil if disabled).
+var upstreamPool *UpstreamPool
+
 func main() {
 	port := flag.String("port", "8000", "server port")
 	configPath := flag.String("config", "config.json", "config file path")
@@ -51,6 +54,7 @@ func main() {
 	applyConfig(cfg)
 	applyRateUsage(cfg)
 	initKeyAuth(cfg)
+	initUpstreamPool(cfg)
 	slog.Info("config loaded", "path", *configPath)
 
 	initOCSession()
@@ -169,6 +173,13 @@ func relayNonStream(w http.ResponseWriter, r *http.Request, body []byte, modelID
 	ctx := r.Context()
 	result, err := callUpstream(ctx, body, modelID, auth)
 	if err != nil {
+		// upstreamStatusError carries the actual upstream response; forward it
+		if se, ok := err.(upstreamStatusError); ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(se.status)
+			w.Write(se.body)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -184,7 +195,7 @@ func relayNonStream(w http.ResponseWriter, r *http.Request, body []byte, modelID
 }
 
 func relayStream(w http.ResponseWriter, r *http.Request, body []byte, modelID string, auth UpstreamAuth) {
-	rc, header, err := callUpstreamStream(r.Context(), body, modelID, auth)
+	rc, header, alias, err := callUpstreamStream(r.Context(), body, modelID, auth)
 	if err != nil {
 		if se, ok := err.(upstreamStatusError); ok {
 			w.Header().Set("Content-Type", "application/json")
@@ -209,6 +220,7 @@ func relayStream(w http.ResponseWriter, r *http.Request, body []byte, modelID st
 		w.Header().Set("Content-Type", ct)
 	}
 	flusher.Flush()
+	slog.Debug("stream relay started", "request_id", reqID(r.Context()), "model", modelID, "key", alias)
 
 	key := apiKeyForRequest(r)
 	var sb strings.Builder

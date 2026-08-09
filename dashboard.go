@@ -10,12 +10,15 @@ import (
 // dashboardData is the JSON payload served by /dashboard/data.
 type dashboardData struct {
 	GeneratedAt  string                `json:"generated_at"`
+	Version      string                `json:"version"`
 	RateLimit    *RateLimitConfig      `json:"rate_limit"`
 	RateWindows  map[string]RateStatus `json:"rate_windows"`
 	UsageEnabled bool                  `json:"usage_enabled"`
 	Usage        map[string]KeyUsage   `json:"usage"`
 	Models       []ModelEntry          `json:"models"`
 	Keys         []KeyEntry            `json:"keys"`
+	PoolStatus   []UpstreamKeyStatus   `json:"pool_status"`
+	PoolEnabled  bool                  `json:"pool_enabled"`
 }
 
 // KeyEntry is a dashboard key row (managed key store).
@@ -50,6 +53,10 @@ func dashboardDataHandler(w http.ResponseWriter, r *http.Request) {
 		Usage:       map[string]KeyUsage{},
 		Models:      collectModelEntries(),
 		Keys:        collectKeyEntries(),
+	}
+	if upstreamPool != nil {
+		data.PoolEnabled = true
+		data.PoolStatus = upstreamPool.Status()
 	}
 	if rateLimiter != nil {
 		data.RateLimit = &RateLimitConfig{
@@ -243,6 +250,25 @@ const dashboardHTML = `<!DOCTYPE html>
   <div class="empty" id="keys-empty" style="display:none">Key management disabled or no keys yet — use <code>zenproxy key create</code>.</div>
 
   <div style="margin-top:32px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+    <h2 style="font-size:16px;font-weight:600">Upstream Pool</h2>
+    <span style="font-size:12px;color:var(--muted)">multi-key failover · auto-rotate on 429/402</span>
+  </div>
+  <table style="margin-top:12px">
+    <thead>
+      <tr>
+        <th>Alias</th>
+        <th>Status</th>
+        <th class="num">Cooldown until</th>
+        <th class="num">Uses</th>
+        <th class="num">Errors</th>
+        <th>Last error</th>
+      </tr>
+    </thead>
+    <tbody id="pool-rows"></tbody>
+  </table>
+  <div class="empty" id="pool-empty" style="display:none">Upstream pool disabled — add <code>upstream_pool.keys</code> to config.json.</div>
+
+  <div style="margin-top:32px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
     <h2 style="font-size:16px;font-weight:600">Models</h2>
     <div style="display:flex;gap:16px;font-size:12px;color:var(--muted)">
       <span><span class="dot" style="color:var(--green)">●</span> free</span>
@@ -341,6 +367,29 @@ async function refresh() {
         '<td class="num">' + spend + '</td>' +
         '<td style="color:var(--muted)">' + models + '</td>';
       krows.appendChild(tr);
+    }
+
+    // upstream pool table
+    const prows = document.getElementById('pool-rows');
+    prows.innerHTML = '';
+    const pool = d.pool_status || [];
+    const pEmpty = document.getElementById('pool-empty');
+    if (!d.pool_enabled || !pool.length) { pEmpty.style.display = 'block'; }
+    else { pEmpty.style.display = 'none'; }
+    for (const k of pool) {
+      const tr = document.createElement('tr');
+      const cd = k.cooldown_until ? new Date(k.cooldown_until).toLocaleString() : '—';
+      const status = k.exhausted
+        ? '<span class="badge" style="background:rgba(248,81,73,.12);color:var(--red)">cooldown</span>'
+        : '<span class="badge" style="background:rgba(63,185,80,.12);color:var(--green)">ready</span>';
+      tr.innerHTML =
+        '<td>' + esc(k.alias) + '</td>' +
+        '<td>' + status + '</td>' +
+        '<td class="num">' + cd + '</td>' +
+        '<td class="num">' + k.use_count + '</td>' +
+        '<td class="num">' + k.error_count + '</td>' +
+        '<td style="color:var(--muted)">' + esc(k.last_error || '—') + '</td>';
+      prows.appendChild(tr);
     }
 
     // models table

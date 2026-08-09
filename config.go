@@ -16,6 +16,15 @@ type AppConfig struct {
 	Usage                *UsageConfig      `json:"usage"`
 	KeyAuth              *KeyAuthConfig    `json:"key_auth"`
 	DashboardAuth        *DashboardAuthConfig `json:"dashboard_auth"`
+	UpstreamPool         *UpstreamPoolConfig `json:"upstream_pool"`
+}
+
+// UpstreamPoolConfig pools multiple upstream API keys with automatic
+// failover when one hits a rate limit / quota exhaustion (429/402).
+type UpstreamPoolConfig struct {
+	Enabled      bool     `json:"enabled"`
+	Keys         []string `json:"keys"`          // OpenCode Zen/Go API keys
+	CooldownSecs int      `json:"cooldown_secs"` // retry delay after exhaustion (default 60)
 }
 
 // KeyAuthConfig controls managed API key authentication.
@@ -117,5 +126,12 @@ func initKeyAuth(cfg AppConfig) {
 		dashboardAuthEnabled = true
 		dashboardAuthToken = cfg.DashboardAuth.Token
 		slog.Info("dashboard auth enabled")
+	}
+}
+
+// initUpstreamPool wires the upstream key pool from config (server mode).
+func initUpstreamPool(cfg AppConfig) {
+	if cfg.UpstreamPool != nil && cfg.UpstreamPool.Enabled && len(cfg.UpstreamPool.Keys) > 0 {
+		upstreamPool = NewUpstreamPool(cfg.UpstreamPool.Keys, cfg.UpstreamPool.CooldownSecs)
 	}
 }
