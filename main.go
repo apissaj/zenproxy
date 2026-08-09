@@ -219,9 +219,20 @@ func relayStream(w http.ResponseWriter, r *http.Request, body []byte, modelID st
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		fmt.Fprint(w, line+"\n")
-		sb.WriteString(line + "\n")
+		// SSE requires a blank line between events; without it clients
+		// that split on "\n\n" see the whole stream as ONE event and fail
+		// with "Extra data" JSON parse errors.
+		fmt.Fprint(w, line+"\n\n")
+		sb.WriteString(line + "\n\n")
 		flusher.Flush()
+		// Stop forwarding once the SSE stream is done. Some upstreams
+		// (e.g. 9Router) append trailing chunks AFTER [DONE] (a final
+		// cost/metrics event). Clients that buffer the response and then
+		// parse JSON would fail with "Extra data" — so we cut the stream
+		// cleanly at [DONE].
+		if strings.TrimSpace(line) == "data: [DONE]" {
+			break
+		}
 	}
 	if err := scanner.Err(); err != nil && err != io.EOF {
 		slog.Error("stream relay error", "request_id", reqID(r.Context()), "error", err)
