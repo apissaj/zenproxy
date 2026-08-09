@@ -13,6 +13,7 @@ keys.json
 # Go build artifacts
 *.test
 *.out
+ds*.json
 
 # Editor/OS
 .vscode/
