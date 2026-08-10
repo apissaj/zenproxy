@@ -227,6 +227,10 @@ func callUpstreamStream(ctx context.Context, body []byte, modelID string, auth U
 			if err != nil {
 				slog.Error("upstream stream transport error", "request_id", reqID(ctx), "model", modelID, "key", alias, "error", err)
 				lastErr = err
+				// retry with fresh session (up to 2 retries)
+				if r < 2 {
+					continue
+				}
 				break
 			}
 			if resp.StatusCode != http.StatusOK {
@@ -273,7 +277,8 @@ func truncate(s string, n int) string {
 }
 
 // retryWithBackoff calls fn up to maxRetries times, backing off between attempts.
-// Returns the first non-429 result. On last attempt, returns whatever fn returns.
+// Retries on 429, 5xx, and transport errors (DNS failure, connection reset, etc.).
+// Returns the first non-retryable result. On last attempt, returns whatever fn returns.
 func retryWithBackoff(ctx context.Context, label string, maxRetries int, fn func() (int, []byte, error)) (int, []byte, error) {
 	var lastStatus int
 	var lastBody []byte
@@ -297,9 +302,16 @@ func retryWithBackoff(ctx context.Context, label string, maxRetries int, fn func
 		lastStatus = status
 		lastBody = body
 		lastErr = err
-		if status != http.StatusTooManyRequests && err == nil {
-			break
+		// retry on: 429 (rate limit), 5xx (server error), or transport errors (DNS, conn reset, timeout)
+		if err != nil {
+			// transport error — retry
+			continue
 		}
+		if status == http.StatusTooManyRequests || status == http.StatusPaymentRequired || status >= 500 {
+			// 429/402/5xx — retry
+			continue
+		}
+		break
 	}
 	return lastStatus, lastBody, lastErr
 }
