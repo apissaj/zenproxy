@@ -207,7 +207,7 @@ All configuration lives in `config.json` (see [`config.example.json`](config.exa
 | `force_disable_thinking` | `false` | Force `thinking: disabled` for all requests |
 | `rate_limit.enabled` | `false` | Enable per-key rate limiting |
 | `rate_limit.requests_per_minute` | `60` | Max requests per key per 60s window |
-| `rate_limit.tokens_per_minute` | `500000` | Max tokens per key per 60s window |
+| `rate_limit.tokens_per_minute` | `500000` | Max tokens per key per 60s window. **Raise this** for coding agents that send large prompts (100K+ tokens). Default 500K ≈ 1-2 requests; **2M** handles 10-15 large requests/min. |
 | `rate_limit.exempt_keys` | `[]` | Keys exempt from limits |
 | `usage.enabled` | `false` | Enable per-key usage & cost tracking |
 | `usage.persist_path` | `usage.json` | JSON file for persisted usage |
