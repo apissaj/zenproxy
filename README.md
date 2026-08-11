@@ -1,62 +1,70 @@
-# zenproxy
+<div align="center">
 
-[![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)](https://go.dev)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/hafizhmuzani/zenproxy?color=blue)](https://github.com/hafizhmuzani/zenproxy/releases)
-[![CI](https://img.shields.io/github/actions/workflow/status/hafizhmuzani/zenproxy/release.yml?label=build)](https://github.com/hafizhmuzani/zenproxy/actions)
-[![Go Report Card](https://goreportcard.com/badge/github.com/hafizhmuzani/zenproxy)](https://goreportcard.com/report/github.com/hafizhmuzani/zenproxy)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+# ⚡ zenproxy
 
-**Single-binary gateway that turns [OpenCode Zen](https://opencode.ai) into OpenAI & Anthropic-compatible APIs** — with multi-key failover, automatic rate-limit retry, per-key budgets, and a live web dashboard.
+**OpenAI & Anthropic-compatible gateway for [OpenCode Zen](https://opencode.ai)**
 
-Built from scratch in Go. **Zero runtime dependencies.** One binary, any platform.
+Drop-in proxy with multi-key failover, automatic rate-limit retry, per-key budgets, and a live web dashboard — wrapped in a single Go binary with zero dependencies.
 
-> ⚠️ Not affiliated with OpenCode or OpenAI. Use only where the upstream terms of service permit.
+[![Go](https://img.shields.io/badge/Go-%3E%3D1.22-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/apissaj/zenproxy?color=blue)](https://github.com/apissaj/zenproxy/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/apissaj/zenproxy/release.yml?label=build)](https://github.com/apissaj/zenproxy/actions)
+[![Tests](https://img.shields.io/badge/tests-35%20passed-green.svg)](.)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](.)
+[![Go Report Card](https://goreportcard.com/badge/github.com/apissaj/zenproxy)](https://goreportcard.com/report/github.com/apissaj/zenproxy)
+
+</div>
 
 ---
 
-## ✨ Highlights
+## ✨ Features
 
-| | |
+| Feature | Description |
 |---|---|
-| 🚀 **Zero-dependency** | Pure Go stdlib — single ~4 MB binary, no Node, no Python, no Docker required |
-| 🔀 **Multi-key failover** | Pool many upstream keys; auto-rotate on `429`/`402` with cooldown & recovery |
+| 🚀 **Zero dependencies** | Pure Go stdlib — single ~4 MB binary, no Node, no Python, no Docker required |
+| 🔀 **Multi-key failover** | Pool many upstream keys; auto-rotate on `429`/`402` with cooldown & auto-recovery |
 | ♻️ **Auto-retry** | Rate-limited? Retries with exponential backoff + fresh session — up to 3 attempts |
-| 🎯 **Session rotation** | New `x-opencode-session` per request — dodges session-keyed free-tier limits |
+| 🎯 **Session rotation** | New `x-opencode-session` per request — sidesteps session-keyed free-tier limits |
+| 🌐 **DNS-failure resilient** | Retries on transport errors (DNS lookup failure, conn reset, timeout) — robust on flaky networks |
 | 🆓 **Free tier ready** | No account needed for `-free` models — `Bearer public` works out of the box |
-| 🔐 **API key management** | SHA-256 hashed keys, model allowlists, budget caps, hot-reload |
+| 🔐 **API key management** | SHA-256 hashed keys, per-key model allowlists and monthly budget caps |
 | 💰 **Usage & cost** | Per-key token tracking with USD cost estimation, persisted to JSON |
-| 📊 **Live dashboard** | Dark-theme web UI: rate windows, usage, costs, model catalog, pool status |
+| 📊 **Live dashboard** | Dark-theme web UI: rate windows, usage, costs, pool status, model catalog |
 | 📜 **OpenAPI spec** | `openapi.yaml` for Postman / Insomnia / client generation |
-| 🌐 **Multi-protocol** | OpenAI Chat Completions, Responses, Anthropic Messages, SSE streaming |
+| 🤖 **Multi-protocol** | OpenAI Chat Completions, Responses, Anthropic Messages — SSE streaming everywhere |
+| 🪟 **Windows autostart** | Hidden VBS launcher for boot-time startup (optional) |
 
 ---
 
 ## 🏗 Architecture
 
 ```
-┌─────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────────────┐
-│  Your Apps  │──▶│    9Router   │──▶│   zenproxy   │──▶│   OpenCode Zen       │
-│  (CLI, IDE, │   │  (optional)  │   │  :8020       │   │   /zen/v1/...        │
-│   scripts)  │   └──────────────┘   │              │   │   /zen/go/v1/...     │
-└─────────────┘                      │  ┌────────┐  │   └──────────────────────┘
-                                     │  │ Key    │  │
-                                     │  │ Pool   │──┼──▶ sk-account-1
-                                     │  └────────┘  │──┼──▶ sk-account-2
-                                     │              │  └──▶ sk-account-3 ...
-                                     └──────────────┘
+┌─────────────┐   ┌──────────────┐   ┌──────────────────┐   ┌──────────────────────┐
+│  Your Apps  │──▶│    9Router   │──▶│     zenproxy     │──▶│     OpenCode Zen     │
+│  (CLI, IDE, │   │  (optional)  │   │      :8020       │   │     /zen/v1/...      │
+│   scripts)  │   └──────────────┘   │                  │   │     /zen/go/v1/...   │
+└─────────────┘                      │   ┌───────────┐   │   └──────────────────────┘
+                                     │   │   Key     │   │
+                                     │   │   Pool    │──▶┬──▶ sk-account-1
+                                     │   │           │  ├──▶ sk-account-2
+                                     │   └───────────┘  └──▶ sk-account-3 ...
+                                     │                  │
+                                     │   ┌───────────┐   │
+                                     │   │  Session  │──▶│──▶ Fresh x-opencode-session
+                                     │   │  Rotator  │   │    per request
+                                     │   └───────────┘   │
+                                     └──────────────────┘
 ```
-
-Requests come in OpenAI/Anthropic format → zenproxy maps them to OpenCode Zen calls → streams responses back as valid SSE.
 
 ---
 
 ## 🚀 Quick Start
 
-### 1. Build
+### 1. Build from source
 
 ```bash
-git clone https://github.com/hafizhmuzani/zenproxy.git
+git clone https://github.com/apissaj/zenproxy.git
 cd zenproxy
 cp config.example.json config.json
 go build -o zenproxy .
@@ -104,7 +112,7 @@ curl http://127.0.0.1:8020/v1/messages \
 
 ## 🔑 Multi-Key Failover (Upstream Pool)
 
-Struggle with one account hitting usage limits? Throw **all your keys** into the pool — zenproxy rotates and fails over automatically.
+Hit usage limits on a single account? Throw **all your keys** into the pool — zenproxy rotates and fails over automatically.
 
 ```json
 {
@@ -140,11 +148,12 @@ Getting `429` from upstream? zenproxy handles it:
 | Layer | Behavior |
 |---|---|
 | **Session rotation** | Fresh `x-opencode-session` + `x-opencode-request` per request |
-| **Retry** | On `429`: wait `2s → 4s` (exponential backoff, max 15s), retry with a **fresh session** |
+| **Transport retry** | DNS failures, connection resets, and timeouts retry with backoff |
+| **HTTP retry** | On `429`/`402`/5xx: wait `2s → 4s` (exponential backoff, max 15s) |
 | **Attempts** | Up to 3 attempts per request before returning the upstream error |
 | **Failover** | If a pool key is exhausted, the next key is tried immediately |
 
-This combination means transient free-tier throttling is usually invisible to your clients.
+This combination means transient free-tier throttling and flaky-network hiccups are usually invisible to your clients.
 
 ---
 
@@ -167,7 +176,7 @@ All configuration lives in `config.json` (see [`config.example.json`](config.exa
   "rate_limit": {
     "enabled": true,
     "requests_per_minute": 200,
-    "tokens_per_minute": 500000,
+    "tokens_per_minute": 2000000,
     "exempt_keys": []
   },
 
@@ -309,7 +318,7 @@ make vet                # static checks
 make release-snapshot   # cross-compile dist/ for all platforms
 ```
 
-Prebuilt binaries for **Linux, macOS, Windows and FreeBSD** are attached to every [GitHub release](https://github.com/hafizhmuzani/zenproxy/releases).
+Prebuilt binaries for **Linux, macOS, Windows and FreeBSD** are attached to every [GitHub release](https://github.com/apissaj/zenproxy/releases).
 
 ### Docker
 
@@ -317,6 +326,14 @@ Prebuilt binaries for **Linux, macOS, Windows and FreeBSD** are attached to ever
 docker build -t zenproxy .
 docker run --rm -p 8000:8000 -v "$PWD/config.json:/app/config.json" zenproxy
 ```
+
+### Windows autostart (optional)
+
+```cmd
+cscript autostart.vbs
+```
+
+Registers `zenproxy.exe` to start at boot, logs to `zenproxy.log`.
 
 ---
 
@@ -326,7 +343,7 @@ docker run --rm -p 8000:8000 -v "$PWD/config.json:/app/config.json" zenproxy
 No. `-free` models run with `Bearer public` — no account, no key, no signup.
 
 **Why am I getting 429?**
-Either zenproxy's own rate limiter (`rate_limit.requests_per_minute`) or upstream throttling. Upstream `429`s auto-retry with fresh sessions; zenproxy's own limiter returns `429` with `Retry-After`.
+Either zenproxy's own rate limiter (`rate_limit.requests_per_minute` / `tokens_per_minute`) or upstream throttling. Upstream `429`s auto-retry with fresh sessions; zenproxy's own limiter returns `429` with `Retry-After`. For coding agents sending 100K+ token prompts, raise `tokens_per_minute` to **2M**.
 
 **Can I use multiple accounts?**
 Yes — for paid accounts, put all your keys in `upstream_pool.keys` and zenproxy fails over automatically.
@@ -340,4 +357,8 @@ It's a single Go binary with no external calls beyond OpenCode Zen. Bind it to l
 
 MIT — see [LICENSE](LICENSE).
 
-Built by [Hafizh Muzani](https://github.com/hafizhmuzani) with ♥ and Go.
+<div align="center">
+
+Built by [apissaj](https://github.com/apissaj) · Built with ♥ and Go
+
+</div>
