@@ -110,6 +110,38 @@ curl http://127.0.0.1:8020/v1/messages \
 
 ---
 
+## 🌐 Proxy Pool — Bypass Per-IP Free-Tier Limits
+
+OpenCode Zen's free tier (`-free` models) limits requests per egress IP. If you hit `FreeUsageLimitError` and want to continue without waiting for the cooldown, route requests through rotating HTTP/SOCKS proxies:
+
+```json
+{
+  "proxy_pool": {
+    "enabled": true,
+    "proxies": [
+      "http://proxy1.example.com:8080",
+      "http://user:pass@proxy2.example.com:3128",
+      "socks5://proxy3.example.com:1080"
+    ],
+    "cooldown_secs": 60
+  }
+}
+```
+
+**How it works:**
+
+1. Each request picks the next healthy proxy (round-robin)
+2. A proxy that returns `429`/`402`/5xx or transport errors is marked **exhausted**
+3. The next request automatically uses the **next healthy proxy**
+4. After `cooldown_secs`, the exhausted proxy recovers and rejoins rotation
+5. Successful requests clear the proxy's cooldown immediately
+
+**Zero dependencies**: only standard `http.Transport.Proxy` for `http(s)://` schemes. For `socks5://`, configure a local HTTP-to-SOCKS wrapper or use `http://` proxies (most common for proxy rotation services).
+
+> 💡 **Combine with key pool** — when both are enabled, you get key × proxy rotation matrix. Free tier doesn't need keys but proxy rotation helps; paid tier benefits from key pool for cost/account isolation.
+
+---
+
 ## 🔑 Multi-Key Failover (Upstream Pool)
 
 Hit usage limits on a single account? Throw **all your keys** into the pool — zenproxy rotates and fails over automatically.
@@ -230,6 +262,9 @@ All configuration lives in `config.json` (see [`config.example.json`](config.exa
 | `upstream_pool.enabled` | `false` | Enable multi-key failover pool |
 | `upstream_pool.keys` | `[]` | Upstream OpenCode tokens (`sk-...`) |
 | `upstream_pool.cooldown_secs` | `60` | Seconds before an exhausted key recovers |
+| `proxy_pool.enabled` | `false` | Enable HTTP/SOCKS proxy rotation |
+| `proxy_pool.proxies` | `[]` | Proxy URLs (`http://user:pass@host:port`, `socks5://...`) |
+| `proxy_pool.cooldown_secs` | `60` | Seconds before an exhausted proxy recovers |
 
 ### CLI flags
 
@@ -275,6 +310,7 @@ Open `http://127.0.0.1:8020/dashboard` (protect it with `dashboard_auth.token`):
 | **Total cost** | Estimated spend across all keys |
 | **Per-key table** | Requests, tokens, cost, last used, live rate-limit window |
 | **Upstream pool** | Each key's status (`ready`/`cooldown`), uses, errors, last error |
+| **Proxy pool** | Each proxy's status (`ready`/`cooldown`), uses, errors, last error |
 | **Model catalog** | All models with `free` / `Go` / `alias` badges |
 
 Auto-refreshes every 5 seconds. Raw JSON at `/dashboard/data`.

@@ -21,6 +21,11 @@ var keyStore *KeyStore
 // upstreamPool is the multi-key rotation pool (nil if disabled).
 var upstreamPool *UpstreamPool
 
+// proxyPool is the HTTP/SOCKS proxy rotation pool (nil if disabled).
+// Used to bypass per-IP free-tier limits by routing requests through
+// different proxy endpoints.
+var proxyPool *ProxyPool
+
 func main() {
 	port := flag.String("port", "8000", "server port")
 	configPath := flag.String("config", "config.json", "config file path")
@@ -55,6 +60,7 @@ func main() {
 	applyRateUsage(cfg)
 	initKeyAuth(cfg)
 	initUpstreamPool(cfg)
+	initProxyPool(cfg)
 	slog.Info("config loaded", "path", *configPath)
 
 	initOCSession()

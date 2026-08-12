@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -66,7 +67,36 @@ func randomHex(n int) string {
 }
 
 // upstreamClient is the shared HTTP client with sane timeouts.
+// Used when no proxy pool is configured.
 var upstreamClient = &http.Client{Timeout: 120 * time.Second}
+
+// clientForRequest returns the HTTP client to use for an upstream call.
+// If proxyPool is enabled, a per-attempt client is created with the picked
+// proxy URL (http, https, or socks5 — via golang.org/x/net/proxy would be
+// ideal, but we keep zero deps: use the URL as Transport.Proxy for http(s)).
+func clientForRequest() (*http.Client, string) {
+	if proxyPool == nil || proxyPool.Len() == 0 {
+		return upstreamClient, ""
+	}
+	proxyURL, raw := proxyPool.Pick()
+	if proxyURL == nil {
+		return upstreamClient, ""
+	}
+	// only http/https are supported via Transport.Proxy (zero-dep);
+	// socks5 schemes are accepted but will not proxy (browser socks5 is rare
+	// for upstream API calls anyway). Users can put http(s) proxies.
+	transport := &http.Transport{
+		Proxy: http.ProxyURL(proxyURL),
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout: 30 * time.Second,
+		IdleConnTimeout:     90 * time.Second,
+		MaxIdleConnsPerHost: 10,
+	}
+	return &http.Client{Timeout: 120 * time.Second, Transport: transport}, raw
+}
 
 type upstreamResult struct {
 	status int
@@ -76,6 +106,8 @@ type upstreamResult struct {
 
 // callUpstream posts a chat-completion style request to OpenCode Zen.
 // Uses the upstream key pool when enabled (failover on 429/402).
+// Uses the proxy pool when enabled (rotate egress IPs on per-IP limits).
+// Falls back to direct connection on the final attempt if all proxies exhausted.
 func callUpstream(ctx context.Context, body []byte, modelID string, auth UpstreamAuth) (upstreamResult, error) {
 	initOCSession()
 	var bodyMap map[string]any
@@ -95,21 +127,31 @@ func callUpstream(ctx context.Context, body []byte, modelID string, auth Upstrea
 
 	// attempt across pool keys (or retry with fresh session when pool disabled)
 	maxAttempts := 1
+	poolSize := 0
 	if upstreamPool != nil {
-		maxAttempts = upstreamPool.Len()
-		if maxAttempts < 1 {
-			maxAttempts = 1
-		}
+		poolSize = upstreamPool.Len()
+	}
+	if proxyPool != nil && proxyPool.Len() > poolSize {
+		poolSize = proxyPool.Len()
+	}
+	if poolSize > 1 {
+		maxAttempts = poolSize
 	}
 	var lastErr error
 	var lastRes upstreamResult
+	var authHeader, alias string
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		authHeader, alias, ok := poolAuthHeader(auth)
+		var proxyAlias string
+		var httpClient *http.Client
+		var ok bool
+		authHeader, alias, ok = poolAuthHeader(auth)
 		if !ok {
 			break
 		}
 		// fresh session per attempt: free-tier rate limits are keyed on session
 		initOCSession()
+		// pick proxy for this attempt (nil if pool disabled)
+		httpClient, proxyAlias = clientForRequest()
 		status, respBody, err := retryWithBackoff(ctx, "chat:"+modelID, 2, func() (int, []byte, error) {
 			req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
 			if err != nil {
@@ -125,21 +167,25 @@ func callUpstream(ctx context.Context, body []byte, modelID string, auth Upstrea
 			req.Header.Set("Accept", "application/json")
 
 			start := time.Now()
-			resp, err := upstreamClient.Do(req)
+			resp, err := httpClient.Do(req)
 			if err != nil {
-				slog.Error("upstream transport error", "request_id", reqID(ctx), "model", modelID, "key", alias, "error", err)
+				slog.Error("upstream transport error", "request_id", reqID(ctx), "model", modelID, "key", alias, "proxy", proxyAlias, "error", err)
 				return 0, nil, err
 			}
 			respBody, err := io.ReadAll(io.LimitReader(resp.Body, 50*1024*1024))
 			resp.Body.Close()
 			slog.Info("upstream_attempt",
-				"request_id", reqID(ctx), "model", modelID, "key", alias, "status", resp.StatusCode,
+				"request_id", reqID(ctx), "model", modelID, "key", alias, "proxy", proxyAlias, "status", resp.StatusCode,
 				"duration_ms", time.Since(start).Milliseconds())
 			return resp.StatusCode, respBody, err
 		})
 		if err != nil && status == 0 {
 			lastErr = err
 			continue
+		}
+		// free-tier IP-limit or transport error: mark proxy as exhausted
+		if (status == http.StatusTooManyRequests || status == http.StatusPaymentRequired || status >= 500) && proxyAlias != "" {
+			proxyPool.MarkExhausted(proxyAlias, fmt.Sprintf("status %d: %s", status, truncate(string(respBody), 120)))
 		}
 		if status == http.StatusTooManyRequests || status == http.StatusPaymentRequired {
 			if upstreamPool != nil {
@@ -149,9 +195,48 @@ func callUpstream(ctx context.Context, body []byte, modelID string, auth Upstrea
 			lastErr = upstreamStatusError{status: status, body: respBody}
 			continue
 		}
+		// success — clear proxy cooldown
+		if status >= 200 && status < 300 && proxyAlias != "" {
+			proxyPool.MarkSuccess(proxyAlias)
+		}
 		lastRes = upstreamResult{status: status, body: respBody, header: nil}
 		lastErr = nil
 		break
+	}
+	// final fallback: if proxy pool is enabled but all proxies exhausted/failed,
+	// retry once with direct connection (no proxy) before giving up.
+	if proxyPool != nil && proxyPool.Len() > 0 {
+		slog.Warn("all proxies exhausted, falling back to direct connection", "request_id", reqID(ctx), "model", modelID)
+		initOCSession()
+		status, respBody, err := retryWithBackoff(ctx, "chat:"+modelID+":direct", 1, func() (int, []byte, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
+			if err != nil {
+				return 0, nil, err
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", authHeader)
+			req.Header.Set("User-Agent", "opencode/"+ocClientVer)
+			req.Header.Set("x-opencode-client", "cli")
+			req.Header.Set("x-opencode-project", ocProjectID)
+			req.Header.Set("x-opencode-session", ocSessionID)
+			req.Header.Set("x-opencode-request", "req_"+randomString(24))
+			req.Header.Set("Accept", "application/json")
+			start := time.Now()
+			resp, err := upstreamClient.Do(req)
+			if err != nil {
+				slog.Error("upstream direct fallback error", "request_id", reqID(ctx), "model", modelID, "error", err)
+				return 0, nil, err
+			}
+			respBody, err := io.ReadAll(io.LimitReader(resp.Body, 50*1024*1024))
+			resp.Body.Close()
+			slog.Info("upstream_attempt_direct",
+				"request_id", reqID(ctx), "model", modelID, "status", resp.StatusCode,
+				"duration_ms", time.Since(start).Milliseconds())
+			return resp.StatusCode, respBody, err
+		})
+		if err == nil && status >= 200 && status < 300 {
+			return upstreamResult{status: status, body: respBody, header: nil}, nil
+		}
 	}
 	if lastErr != nil {
 		return upstreamResult{}, lastErr
@@ -179,11 +264,15 @@ func callUpstreamStream(ctx context.Context, body []byte, modelID string, auth U
 	}
 
 	maxAttempts := 1
+	poolSize := 0
 	if upstreamPool != nil {
-		maxAttempts = upstreamPool.Len()
-		if maxAttempts < 1 {
-			maxAttempts = 1
-		}
+		poolSize = upstreamPool.Len()
+	}
+	if proxyPool != nil && proxyPool.Len() > poolSize {
+		poolSize = proxyPool.Len()
+	}
+	if poolSize > 1 {
+		maxAttempts = poolSize
 	}
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -193,6 +282,8 @@ func callUpstreamStream(ctx context.Context, body []byte, modelID string, auth U
 		}
 		// fresh session per attempt: free-tier rate limits are keyed on session
 		initOCSession()
+		// pick proxy for this attempt (nil if pool disabled)
+		httpClient, proxyAlias := clientForRequest()
 		// retry stream connection on 429 with fresh session + backoff
 		for r := 0; r <= 2; r++ {
 			if r > 0 {
@@ -200,7 +291,7 @@ func callUpstreamStream(ctx context.Context, body []byte, modelID string, auth U
 				if wait > 10*time.Second {
 					wait = 10 * time.Second
 				}
-				slog.Warn("retrying upstream stream", "request_id", reqID(ctx), "model", modelID, "key", alias, "attempt", r)
+				slog.Warn("retrying upstream stream", "request_id", reqID(ctx), "model", modelID, "key", alias, "proxy", proxyAlias, "attempt", r)
 				timer := time.NewTimer(wait)
 				select {
 				case <-ctx.Done():
@@ -209,6 +300,8 @@ func callUpstreamStream(ctx context.Context, body []byte, modelID string, auth U
 				case <-timer.C:
 				}
 				initOCSession()
+				// re-pick proxy on retry (a fresh proxy may have come off cooldown)
+				httpClient, proxyAlias = clientForRequest()
 			}
 			req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
 			if err != nil {
@@ -223,9 +316,12 @@ func callUpstreamStream(ctx context.Context, body []byte, modelID string, auth U
 			req.Header.Set("x-opencode-request", "req_"+randomString(24))
 			req.Header.Set("Accept", "text/event-stream")
 
-			resp, err := upstreamClient.Do(req)
+			resp, err := httpClient.Do(req)
 			if err != nil {
-				slog.Error("upstream stream transport error", "request_id", reqID(ctx), "model", modelID, "key", alias, "error", err)
+				slog.Error("upstream stream transport error", "request_id", reqID(ctx), "model", modelID, "key", alias, "proxy", proxyAlias, "error", err)
+				if proxyAlias != "" {
+					proxyPool.MarkExhausted(proxyAlias, err.Error())
+				}
 				lastErr = err
 				// retry with fresh session (up to 2 retries)
 				if r < 2 {
@@ -236,6 +332,10 @@ func callUpstreamStream(ctx context.Context, body []byte, modelID string, auth U
 			if resp.StatusCode != http.StatusOK {
 				body, _ := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
 				resp.Body.Close()
+				// mark proxy exhausted on IP-limit / server errors
+				if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusPaymentRequired || resp.StatusCode >= 500) && proxyAlias != "" {
+					proxyPool.MarkExhausted(proxyAlias, fmt.Sprintf("status %d: %s", resp.StatusCode, truncate(string(body), 120)))
+				}
 				// failover on quota/rate errors
 				if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusPaymentRequired {
 					if upstreamPool != nil {
@@ -249,6 +349,10 @@ func callUpstreamStream(ctx context.Context, body []byte, modelID string, auth U
 					break
 				}
 				return nil, resp.Header, "", upstreamStatusError{status: resp.StatusCode, body: body}
+			}
+			// success — clear proxy cooldown
+			if proxyAlias != "" {
+				proxyPool.MarkSuccess(proxyAlias)
 			}
 			return resp.Body, resp.Header, alias, nil
 		}

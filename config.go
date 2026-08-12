@@ -9,14 +9,24 @@ import (
 
 // AppConfig is the on-disk configuration shape (config.json).
 type AppConfig struct {
-	ModelAlias           map[string]string `json:"model_alias"`
-	ReasoningEffortMap   map[string]string `json:"reasoning_effort_map"`
-	ForceDisableThinking bool              `json:"force_disable_thinking"`
-	RateLimit            *RateLimitConfig  `json:"rate_limit"`
-	Usage                *UsageConfig      `json:"usage"`
-	KeyAuth              *KeyAuthConfig    `json:"key_auth"`
-	DashboardAuth        *DashboardAuthConfig `json:"dashboard_auth"`
-	UpstreamPool         *UpstreamPoolConfig `json:"upstream_pool"`
+	ModelAlias           map[string]string     `json:"model_alias"`
+	ReasoningEffortMap   map[string]string     `json:"reasoning_effort_map"`
+	ForceDisableThinking bool                  `json:"force_disable_thinking"`
+	RateLimit            *RateLimitConfig      `json:"rate_limit"`
+	Usage                *UsageConfig          `json:"usage"`
+	KeyAuth              *KeyAuthConfig        `json:"key_auth"`
+	DashboardAuth        *DashboardAuthConfig  `json:"dashboard_auth"`
+	UpstreamPool         *UpstreamPoolConfig   `json:"upstream_pool"`
+	ProxyPool            *ProxyPoolConfig      `json:"proxy_pool"`
+}
+
+// ProxyPoolConfig controls HTTP proxy rotation for upstream calls.
+// Used to bypass per-IP free-tier limits (FreeUsageLimitError) by
+// routing requests through different proxy endpoints.
+type ProxyPoolConfig struct {
+	Enabled      bool     `json:"enabled"`
+	Proxies      []string `json:"proxies"`       // list of proxy URLs (http://, socks5://)
+	CooldownSecs int      `json:"cooldown_secs"` // retry delay after a proxy hits 429/limit
 }
 
 // UpstreamPoolConfig pools multiple upstream API keys with automatic
@@ -133,5 +143,14 @@ func initKeyAuth(cfg AppConfig) {
 func initUpstreamPool(cfg AppConfig) {
 	if cfg.UpstreamPool != nil && cfg.UpstreamPool.Enabled && len(cfg.UpstreamPool.Keys) > 0 {
 		upstreamPool = NewUpstreamPool(cfg.UpstreamPool.Keys, cfg.UpstreamPool.CooldownSecs)
+	}
+}
+
+// initProxyPool wires the HTTP/SOCKS proxy rotation pool from config.
+// Used to bypass per-IP free-tier rate limits by rotating egress IPs.
+func initProxyPool(cfg AppConfig) {
+	if cfg.ProxyPool != nil && cfg.ProxyPool.Enabled && len(cfg.ProxyPool.Proxies) > 0 {
+		proxyPool = NewProxyPool(cfg.ProxyPool.Proxies, cfg.ProxyPool.CooldownSecs)
+		slog.Info("proxy_pool enabled", "count", proxyPool.Len(), "cooldown_secs", cfg.ProxyPool.CooldownSecs)
 	}
 }
