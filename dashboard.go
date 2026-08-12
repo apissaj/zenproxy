@@ -19,6 +19,8 @@ type dashboardData struct {
 	Keys         []KeyEntry            `json:"keys"`
 	PoolStatus   []UpstreamKeyStatus   `json:"pool_status"`
 	PoolEnabled  bool                  `json:"pool_enabled"`
+	ProxyStatus  []ProxyStatus         `json:"proxy_status"`
+	ProxyEnabled bool                  `json:"proxy_enabled"`
 }
 
 // KeyEntry is a dashboard key row (managed key store).
@@ -57,6 +59,10 @@ func dashboardDataHandler(w http.ResponseWriter, r *http.Request) {
 	if upstreamPool != nil {
 		data.PoolEnabled = true
 		data.PoolStatus = upstreamPool.Status()
+	}
+	if proxyPool != nil {
+		data.ProxyEnabled = true
+		data.ProxyStatus = proxyPool.Snapshot()
 	}
 	if rateLimiter != nil {
 		data.RateLimit = &RateLimitConfig{
@@ -269,6 +275,25 @@ const dashboardHTML = `<!DOCTYPE html>
   <div class="empty" id="pool-empty" style="display:none">Upstream pool disabled — add <code>upstream_pool.keys</code> to config.json.</div>
 
   <div style="margin-top:32px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+    <h2 style="font-size:16px;font-weight:600">Proxy Pool</h2>
+    <span style="font-size:12px;color:var(--muted)">HTTP/SOCKS proxy rotation · bypass per-IP free-tier limits</span>
+  </div>
+  <table style="margin-top:12px">
+    <thead>
+      <tr>
+        <th>Proxy URL</th>
+        <th>Status</th>
+        <th class="num">Cooldown until</th>
+        <th class="num">Uses</th>
+        <th class="num">Errors</th>
+        <th>Last error</th>
+      </tr>
+    </thead>
+    <tbody id="proxy-rows"></tbody>
+  </table>
+  <div class="empty" id="proxy-empty" style="display:none">Proxy pool disabled — add <code>proxy_pool.proxies</code> to config.json. Useful when OpenCode Zen limits free tier per egress IP.</div>
+
+  <div style="margin-top:32px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
     <h2 style="font-size:16px;font-weight:600">Models</h2>
     <div style="display:flex;gap:16px;font-size:12px;color:var(--muted)">
       <span><span class="dot" style="color:var(--green)">●</span> free</span>
@@ -390,6 +415,29 @@ async function refresh() {
         '<td class="num">' + k.error_count + '</td>' +
         '<td style="color:var(--muted)">' + esc(k.last_error || '—') + '</td>';
       prows.appendChild(tr);
+    }
+
+    // proxy pool table
+    const pxrows = document.getElementById('proxy-rows');
+    pxrows.innerHTML = '';
+    const proxies = d.proxy_status || [];
+    const pxEmpty = document.getElementById('proxy-empty');
+    if (!d.proxy_enabled || !proxies.length) { pxEmpty.style.display = 'block'; }
+    else { pxEmpty.style.display = 'none'; }
+    for (const k of proxies) {
+      const tr = document.createElement('tr');
+      const cd = k.until && new Date(k.until).getTime() > Date.now() ? new Date(k.until).toLocaleString() : '—';
+      const status = k.status === 'cooldown'
+        ? '<span class="badge" style="background:rgba(248,81,73,.12);color:var(--red)">cooldown</span>'
+        : '<span class="badge" style="background:rgba(63,185,80,.12);color:var(--green)">ready</span>';
+      tr.innerHTML =
+        '<td><code>' + esc(k.url) + '</code></td>' +
+        '<td>' + status + '</td>' +
+        '<td class="num">' + cd + '</td>' +
+        '<td class="num">' + k.uses + '</td>' +
+        '<td class="num">' + k.errors + '</td>' +
+        '<td style="color:var(--muted)">' + esc(k.last_error || '—') + '</td>';
+      pxrows.appendChild(tr);
     }
 
     // models table

@@ -47,5 +47,13 @@
       "sk-your-backup-key-here"
     ],
     "cooldown_secs": 60
+  },
+  "proxy_pool": {
+    "enabled": false,
+    "proxies": [
+      "http://proxy1.example.com:8080",
+      "http://user:pass@proxy2.example.com:3128"
+    ],
+    "cooldown_secs": 60
   }
 }
