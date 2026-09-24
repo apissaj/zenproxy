@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -9,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -177,43 +175,22 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 
 func relayNonStream(w http.ResponseWriter, r *http.Request, body []byte, modelID string, auth UpstreamAuth) {
 	ctx := r.Context()
-	result, err := callUpstream(ctx, body, modelID, auth)
+	result, err := callUpstreamRelay(ctx, body, modelID)
 	if err != nil {
-		// upstreamStatusError carries the actual upstream response; forward it
-		if se, ok := err.(upstreamStatusError); ok {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(se.status)
-			w.Write(se.body)
-			return
-		}
+		slog.Error("relay_error", "request_id", reqID(ctx), "model", modelID, "error", err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	if result.status != http.StatusOK {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(result.status)
-		w.Write(result.body)
-		return
-	}
 	w.Header().Set("Content-Type", "application/json")
+	if result.status != http.StatusOK {
+		w.WriteHeader(result.status)
+	}
 	w.Write(result.body)
 	recordUsageFromBody(apiKeyForRequest(r), result.body)
 }
 
 func relayStream(w http.ResponseWriter, r *http.Request, body []byte, modelID string, auth UpstreamAuth) {
-	rc, header, alias, err := callUpstreamStream(r.Context(), body, modelID, auth)
-	if err != nil {
-		if se, ok := err.(upstreamStatusError); ok {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(se.status)
-			w.Write(se.body)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	defer rc.Close()
-
+	ctx := r.Context()
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -222,38 +199,19 @@ func relayStream(w http.ResponseWriter, r *http.Request, body []byte, modelID st
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	if ct := header.Get("Content-Type"); ct != "" {
-		w.Header().Set("Content-Type", ct)
-	}
+	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
-	slog.Debug("stream relay started", "request_id", reqID(r.Context()), "model", modelID, "key", alias)
+	slog.Info("relay_stream_start", "request_id", reqID(ctx), "model", modelID)
 
-	key := apiKeyForRequest(r)
-	var sb strings.Builder
-	scanner := bufio.NewScanner(rc)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.TrimSpace(line) == "" {
-			continue
+	err := relaySSE(ctx, w, func() { flusher.Flush() }, body, modelID)
+	if err != nil {
+		slog.Error("relay_stream_error", "request_id", reqID(ctx), "model", modelID, "error", err)
+		// if nothing was written yet, send proper error; otherwise client already got partial SSE
+		payload := map[string]any{
+			"error": map[string]any{"message": err.Error(), "type": "relay_error"},
 		}
-		// SSE requires a blank line between events; without it clients
-		// that split on "\n\n" see the whole stream as ONE event and fail
-		// with "Extra data" JSON parse errors.
-		fmt.Fprint(w, line+"\n\n")
-		sb.WriteString(line + "\n\n")
+		raw, _ := json.Marshal(payload)
+		fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", raw)
 		flusher.Flush()
-		// Stop forwarding once the SSE stream is done. Some upstreams
-		// (e.g. 9Router) append trailing chunks AFTER [DONE] (a final
-		// cost/metrics event). Clients that buffer the response and then
-		// parse JSON would fail with "Extra data" — so we cut the stream
-		// cleanly at [DONE].
-		if strings.TrimSpace(line) == "data: [DONE]" {
-			break
-		}
 	}
-	if err := scanner.Err(); err != nil && err != io.EOF {
-		slog.Error("stream relay error", "request_id", reqID(r.Context()), "error", err)
-	}
-	recordUsageFromStream(key, sb.String())
 }
