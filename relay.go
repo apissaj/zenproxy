@@ -12,9 +12,8 @@ import (
 	"time"
 )
 
-// relayBaseURL is the local OpenCode server that has a valid TLS fingerprint
-// for upstream free-tier access. Zenproxy relays through this instead of
-// hitting opencode.ai directly (which now rejects non-CLI clients).
+// Local OpenCode server: its Node/Bun TLS fingerprint passes the free-tier
+// origin check; opencode.ai rejects direct non-CLI requests.
 const relayBaseURL = "http://127.0.0.1:4096"
 
 var relayClient = &http.Client{Timeout: 180 * time.Second}
@@ -144,15 +143,12 @@ func relayWaitResult(ctx context.Context, sessionID, userMsgID string, timeout t
 			continue
 		}
 
-		// Find the latest assistant message that has finished
 		for i := len(ctxResp.Data) - 1; i >= 0; i-- {
 			msg := &ctxResp.Data[i]
 			if msg.Type == "assistant" && msg.Finish != "" && msg.Time.Completed > 0 {
-				// Check if there was an error from provider
 				if msg.Finish == "error" && msg.Error != nil && msg.Error.Message != "" {
 					return nil, fmt.Errorf("upstream error: %s", msg.Error.Message)
 				}
-				// Only accept if content is non-empty
 				result := extractAssistantText(msg)
 				if result.Text != "" {
 					return result, nil
@@ -253,25 +249,22 @@ func callUpstreamRelay(ctx context.Context, body []byte, modelID string) (upstre
 
 	slog.Info("relay_start", "request_id", reqID(ctx), "model", modelID, "prompt_len", len(promptText))
 
-	// Step 1: Create session
 	sessionID, err := relayCreateSession(ctx)
 	if err != nil {
 		return upstreamResult{}, fmt.Errorf("relay session: %w", err)
 	}
 	slog.Debug("relay_session_created", "session_id", sessionID)
 
-	// Step 2: Set model
 	if err := relaySetModel(ctx, sessionID, modelID); err != nil {
 		return upstreamResult{}, fmt.Errorf("relay model: %w", err)
 	}
 
-	// Step 3: Send prompt
 	userMsgID, err := relaySendPrompt(ctx, sessionID, promptText)
 	if err != nil {
 		return upstreamResult{}, fmt.Errorf("relay prompt: %w", err)
 	}
 
-	// Step 4: Wait for result (timeout 120s)
+	// 120s: free-tier models can stall well past the 3s happy path
 	result, err := relayWaitResult(ctx, sessionID, userMsgID, 120*time.Second)
 	if err != nil {
 		return upstreamResult{}, fmt.Errorf("relay wait: %w", err)
@@ -280,7 +273,6 @@ func callUpstreamRelay(ctx context.Context, body []byte, modelID string) (upstre
 	elapsed := time.Since(start)
 	slog.Info("relay_done", "request_id", reqID(ctx), "model", modelID, "duration_ms", elapsed.Milliseconds(), "response_len", len(result.Text))
 
-	// Step 5: Convert to OpenAI ChatCompletion response format
 	openaiResp := buildOpenAIResponse(modelID, result)
 	respBody, _ := json.Marshal(openaiResp)
 
@@ -464,7 +456,6 @@ func relaySSE(ctx context.Context, w io.Writer, flusher func(), body []byte, mod
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher()
 
-	// extract usage from the OpenAI response body we built
 	var fullResp struct {
 		Usage *struct {
 			PromptTokens     int `json:"prompt_tokens"`
