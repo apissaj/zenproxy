@@ -18,7 +18,6 @@ const relayBaseURL = "http://127.0.0.1:4096"
 
 var relayClient = &http.Client{Timeout: 180 * time.Second}
 
-// relaySession creates a new session on the local OpenCode server.
 func relayCreateSession(ctx context.Context) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, relayBaseURL+"/api/session", strings.NewReader("{}"))
 	if err != nil {
@@ -48,7 +47,6 @@ func relayCreateSession(ctx context.Context) (string, error) {
 	return result.Data.ID, nil
 }
 
-// relaySetModel sets the model for a session.
 func relaySetModel(ctx context.Context, sessionID, modelID string) error {
 	payload := map[string]any{
 		"model": map[string]string{
@@ -75,7 +73,6 @@ func relaySetModel(ctx context.Context, sessionID, modelID string) error {
 	return nil
 }
 
-// relaySendPrompt sends a text prompt to a session.
 func relaySendPrompt(ctx context.Context, sessionID, text string) (string, error) {
 	payload := map[string]any{
 		"prompt": map[string]string{"text": text},
@@ -105,7 +102,7 @@ func relaySendPrompt(ctx context.Context, sessionID, text string) (string, error
 	return result.Data.ID, nil
 }
 
-// relayWaitResult polls session context until an assistant message with finish appears.
+// Polls /context: /history returns events, not messages, so lookup fails there.
 func relayWaitResult(ctx context.Context, sessionID, userMsgID string, timeout time.Duration) (*relayAssistantMsg, error) {
 	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(800 * time.Millisecond)
@@ -229,19 +226,15 @@ func extractAssistantText(msg *relayMessage) *relayAssistantMsg {
 	}
 }
 
-// callUpstreamRelay is the drop-in replacement for callUpstream that routes
-// through the local OpenCode server (valid TLS fingerprint) instead of hitting
-// opencode.ai directly.
+// Drop-in replacement for callUpstream; routes via the local OpenCode server.
 func callUpstreamRelay(ctx context.Context, body []byte, modelID string) (upstreamResult, error) {
 	start := time.Now()
 
-	// Parse the OpenAI-format request to extract messages
 	var openaiReq map[string]any
 	if err := json.Unmarshal(body, &openaiReq); err != nil {
 		return upstreamResult{}, fmt.Errorf("relay: invalid request body: %w", err)
 	}
 
-	// Flatten messages into a single prompt text
 	promptText := flattenMessages(openaiReq["messages"])
 	if promptText == "" {
 		return upstreamResult{}, fmt.Errorf("relay: no messages in request")
@@ -279,8 +272,6 @@ func callUpstreamRelay(ctx context.Context, body []byte, modelID string) (upstre
 	return upstreamResult{status: 200, body: respBody, header: nil}, nil
 }
 
-// flattenMessages converts OpenAI messages array into a single prompt string.
-// Preserves system/user/assistant roles as labeled sections.
 func flattenMessages(messages any) string {
 	arr, ok := messages.([]any)
 	if !ok {
@@ -342,7 +333,6 @@ func extractContent(content any) string {
 	}
 }
 
-// buildOpenAIResponse wraps relay result into standard OpenAI ChatCompletion JSON.
 func buildOpenAIResponse(modelID string, result *relayAssistantMsg) map[string]any {
 	usage := map[string]any{
 		"prompt_tokens":     0,
@@ -381,17 +371,14 @@ func min(a, b int) int {
 	return b
 }
 
-// relaySSE streams a buffered relay response as OpenAI-compatible SSE chunks.
-// The OpenCode session API has no incremental token endpoint, so we emit the
-// full text in word-sized deltas to preserve the SSE contract for clients
-// (9Router requires stream:true for its usage history).
+// OpenCode session API has no incremental token endpoint, so the buffered
+// text is replayed as word-sized deltas to preserve the SSE contract.
 func relaySSE(ctx context.Context, w io.Writer, flusher func(), body []byte, modelID string) error {
 	result, err := callUpstreamRelay(ctx, body, modelID)
 	if err != nil {
 		return err
 	}
 
-	// parse the OpenAI response we just built
 	var resp struct {
 		Choices []struct {
 			Message struct {
@@ -434,10 +421,9 @@ func relaySSE(ctx context.Context, w io.Writer, flusher func(), body []byte, mod
 		flusher()
 	}
 
-	// role preamble
+	// OpenAI SSE requires role in the first chunk.
 	writeChunk(map[string]any{"role": "assistant", "content": ""}, nil)
 
-	// emit text in word-sized deltas so the client sees progressive output
 	words := strings.Fields(text)
 	if len(words) == 0 {
 		writeChunk(map[string]any{"content": text}, nil)
@@ -451,7 +437,6 @@ func relaySSE(ctx context.Context, w io.Writer, flusher func(), body []byte, mod
 		}
 	}
 
-	// final chunk with finish_reason
 	writeChunk(map[string]any{}, finish)
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher()
